@@ -1,0 +1,45 @@
+
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.csproj.user
+Properties/launchSettings.json
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+next-env.d.ts
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+
+# Working dirs (runtime)
+working/
+infra/postgres-data/
+
+# Test repos
+test-repos/
