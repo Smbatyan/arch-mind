@@ -3,6 +3,7 @@ using System;
 using ArchMind.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ArchMind.Infrastructure.Migrations
 {
     [DbContext(typeof(ArchMindDbContext))]
-    partial class ArchMindDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260525195915_AddApiKeysAndTelemetry")]
+    partial class AddApiKeysAndTelemetry
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -494,144 +497,6 @@ namespace ArchMind.Infrastructure.Migrations
                     b.ToTable("scan_runs", (string)null);
                 });
 
-            modelBuilder.Entity("ArchMind.Core.Entities.Skill", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<string>("Body")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("body");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("description");
-
-                    b.Property<bool>("Enabled")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("boolean")
-                        .HasDefaultValue(true)
-                        .HasColumnName("enabled");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("name");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("title");
-
-                    b.PrimitiveCollection<string[]>("Triggers")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("triggers");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("updated_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("workspace_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("WorkspaceId", "Name")
-                        .IsUnique()
-                        .HasDatabaseName("ix_skills_workspace_name");
-
-                    b.ToTable("skills", (string)null);
-                });
-
-            modelBuilder.Entity("ArchMind.Core.Entities.SkillRevision", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<string>("Body")
-                        .IsRequired()
-                        .HasColumnType("text")
-                        .HasColumnName("body");
-
-                    b.Property<string>("ChangeNote")
-                        .IsRequired()
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("change_note");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<string>("Description")
-                        .IsRequired()
-                        .HasMaxLength(2000)
-                        .HasColumnType("character varying(2000)")
-                        .HasColumnName("description");
-
-                    b.Property<bool>("Enabled")
-                        .HasColumnType("boolean")
-                        .HasColumnName("enabled");
-
-                    b.Property<Guid>("SkillId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("skill_id");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(200)
-                        .HasColumnType("character varying(200)")
-                        .HasColumnName("title");
-
-                    b.PrimitiveCollection<string[]>("Triggers")
-                        .IsRequired()
-                        .HasColumnType("text[]")
-                        .HasColumnName("triggers");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer")
-                        .HasColumnName("version");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("workspace_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("SkillId", "Version")
-                        .IsUnique()
-                        .HasDatabaseName("ix_skill_revisions_skill_version");
-
-                    b.HasIndex("WorkspaceId", "CreatedAt")
-                        .IsDescending(false, true)
-                        .HasDatabaseName("ix_skill_revisions_workspace_created_desc");
-
-                    b.ToTable("skill_revisions", (string)null);
-                });
-
             modelBuilder.Entity("ArchMind.Core.Entities.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -851,36 +716,6 @@ namespace ArchMind.Infrastructure.Migrations
                         .HasForeignKey("WorkspaceId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("ArchMind.Core.Entities.Skill", b =>
-                {
-                    b.HasOne("ArchMind.Core.Entities.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("ArchMind.Core.Entities.SkillRevision", b =>
-                {
-                    b.HasOne("ArchMind.Core.Entities.Skill", "Skill")
-                        .WithMany()
-                        .HasForeignKey("SkillId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("ArchMind.Core.Entities.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Skill");
 
                     b.Navigation("Workspace");
                 });

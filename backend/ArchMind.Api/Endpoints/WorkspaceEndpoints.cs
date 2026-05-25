@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text.RegularExpressions;
+using ArchMind.Core.Abstractions;
 using ArchMind.Core.Entities;
 using ArchMind.Infrastructure.Data;
 using Microsoft.AspNetCore.Http;
@@ -29,6 +30,11 @@ public static partial class WorkspaceEndpoints
         group.MapPost("/", CreateAsync);
         group.MapGet("/", ListAsync);
         group.MapGet("/{slug}", GetBySlugAsync);
+
+        // BE-028: workspace API keys for MCP bearer-token auth.
+        group.MapPost("/{slug}/api-keys", CreateApiKeyAsync);
+        group.MapGet("/{slug}/api-keys", ListApiKeysAsync);
+        group.MapDelete("/{slug}/api-keys/{id:guid}", RevokeApiKeyAsync);
 
         return app;
     }
@@ -149,8 +155,136 @@ public static partial class WorkspaceEndpoints
     }
 
     // ---------------------------------------------------------------------
+    // BE-028: API key DTOs + handlers
+    // ---------------------------------------------------------------------
+    public sealed record CreateApiKeyRequest(string? Name);
+    public sealed record CreateApiKeyResponse(
+        Guid Id,
+        string Name,
+        string Plaintext,
+        string Prefix,
+        DateTimeOffset CreatedAt);
+    public sealed record ApiKeyResponse(
+        Guid Id,
+        string Name,
+        string Prefix,
+        DateTimeOffset CreatedAt,
+        DateTimeOffset? LastUsedAt,
+        DateTimeOffset? RevokedAt);
+
+    private static async Task<IResult> CreateApiKeyAsync(
+        string slug,
+        [FromBody] CreateApiKeyRequest req,
+        ArchMindDbContext db,
+        IApiKeyService apiKeys,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        if (!httpContext.TryGetCurrentUserId(out var userId))
+        {
+            return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var name = req?.Name?.Trim() ?? string.Empty;
+        if (name.Length is < 1 or > 200)
+        {
+            return Results.BadRequest(new { error = "invalid name" });
+        }
+
+        var workspace = await ResolveMemberWorkspaceAsync(db, slug, userId, ct);
+        if (workspace is null)
+        {
+            return Results.Json(new { error = "not found" }, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var (entity, plaintext) = await apiKeys.CreateAsync(workspace.Id, name, ct);
+
+        return Results.Ok(new CreateApiKeyResponse(
+            entity.Id,
+            entity.Name,
+            plaintext,
+            entity.KeyPrefix,
+            entity.CreatedAt));
+    }
+
+    private static async Task<IResult> ListApiKeysAsync(
+        string slug,
+        ArchMindDbContext db,
+        IApiKeyService apiKeys,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        if (!httpContext.TryGetCurrentUserId(out var userId))
+        {
+            return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var workspace = await ResolveMemberWorkspaceAsync(db, slug, userId, ct);
+        if (workspace is null)
+        {
+            return Results.Json(new { error = "not found" }, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        var keys = await apiKeys.ListAsync(workspace.Id, ct);
+        var response = keys
+            .Select(k => new ApiKeyResponse(k.Id, k.Name, k.KeyPrefix, k.CreatedAt, k.LastUsedAt, k.RevokedAt))
+            .ToList();
+
+        return Results.Ok(response);
+    }
+
+    private static async Task<IResult> RevokeApiKeyAsync(
+        string slug,
+        Guid id,
+        ArchMindDbContext db,
+        IApiKeyService apiKeys,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        if (!httpContext.TryGetCurrentUserId(out var userId))
+        {
+            return Results.Json(new { error = "unauthenticated" }, statusCode: StatusCodes.Status401Unauthorized);
+        }
+
+        var workspace = await ResolveMemberWorkspaceAsync(db, slug, userId, ct);
+        if (workspace is null)
+        {
+            return Results.Json(new { error = "not found" }, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        // Verify the key actually belongs to this workspace before revoking.
+        var owned = await db.WorkspaceApiKeys
+            .AsNoTracking()
+            .AnyAsync(k => k.Id == id && k.WorkspaceId == workspace.Id, ct);
+        if (!owned)
+        {
+            return Results.Json(new { error = "not found" }, statusCode: StatusCodes.Status404NotFound);
+        }
+
+        await apiKeys.RevokeAsync(id, ct);
+        return Results.NoContent();
+    }
+
+    // ---------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------
+    private static async Task<Workspace?> ResolveMemberWorkspaceAsync(
+        ArchMindDbContext db,
+        string slug,
+        Guid userId,
+        CancellationToken ct)
+    {
+        return await db.Workspaces
+            .AsNoTracking()
+            .Where(w => w.Slug == slug)
+            .Join(
+                db.WorkspaceMembers.AsNoTracking().Where(m => m.UserId == userId),
+                w => w.Id,
+                m => m.WorkspaceId,
+                (w, _) => w)
+            .FirstOrDefaultAsync(ct);
+    }
+
     private static bool TryGetCurrentUserId(this HttpContext httpContext, out Guid userId)
     {
         var idClaim = httpContext.User.FindFirstValue(ClaimTypes.NameIdentifier);

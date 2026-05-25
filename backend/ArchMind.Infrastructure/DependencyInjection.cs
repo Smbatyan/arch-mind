@@ -1,6 +1,7 @@
 using ArchMind.Core.Abstractions;
 using ArchMind.Core.Extraction;
 using ArchMind.Infrastructure.Anthropic;
+using ArchMind.Infrastructure.Auth;
 using ArchMind.Infrastructure.Cloning;
 using ArchMind.Infrastructure.Data;
 using ArchMind.Infrastructure.Extraction;
@@ -9,6 +10,7 @@ using ArchMind.Infrastructure.Graph;
 using ArchMind.Infrastructure.Graphify;
 using ArchMind.Infrastructure.Llm;
 using ArchMind.Infrastructure.Services;
+using ArchMind.Infrastructure.Telemetry;
 using Microsoft.Extensions.DependencyInjection;
 using GitHubClientImpl = ArchMind.Infrastructure.GitHub.GitHubClient;
 
@@ -65,6 +67,15 @@ public static class DependencyInjection
         // IDbConnectionFactory registered above (LOAD 'age' + search_path
         // bootstrap runs per-connection there).
         services.AddScoped<IGraphReader, GraphReader>();
+
+        // BE-028: workspace API key issuance / validation / revocation.
+        services.AddScoped<IApiKeyService, ApiKeyService>();
+
+        // BE-032: MCP + LLM telemetry sink (best-effort EF inserts).
+        services.AddScoped<ITelemetryRecorder, TelemetryRecorder>();
+
+        // BE-035: heuristic skill matcher (no embeddings yet).
+        services.AddScoped<ISkillMatcher, ArchMind.Infrastructure.Skills.SkillMatcher>();
 
         return services;
     }

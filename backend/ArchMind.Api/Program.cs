@@ -1,5 +1,6 @@
 using ArchMind.Api.Auth;
 using ArchMind.Api.Endpoints;
+using ArchMind.Api.Mcp;
 using ArchMind.Api.Middleware;
 using ArchMind.Core.Abstractions;
 using ArchMind.Infrastructure;
@@ -30,6 +31,23 @@ Log.Logger = new LoggerConfiguration()
 try
 {
     var builder = WebApplication.CreateBuilder(args);
+
+    // -----------------------------------------------------------------------
+    // Kestrel server limits (DO-008)
+    //
+    // SSE-friendly tuning for the MCP endpoint at /mcp/{workspaceSlug}:
+    //   * Raise KeepAliveTimeout well beyond the 15s heartbeat cadence so
+    //     intermediaries that honor it don't drop idle streams.
+    //   * Cap request bodies at 10 MiB (well above any JSON-RPC payload).
+    //   * No per-request timeout — SSE cancellation is driven by client
+    //     disconnect / app-level CancellationToken inside HandleGetAsync.
+    // -----------------------------------------------------------------------
+    builder.WebHost.ConfigureKestrel(o =>
+    {
+        o.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+        o.Limits.MaxRequestBodySize = 10 * 1024 * 1024;
+        // No per-request timeout for SSE — handled by app-level cancellation.
+    });
 
     // -----------------------------------------------------------------------
     // Configuration
@@ -149,6 +167,20 @@ try
     builder.Services.AddArchMindWorkers();
 
     // -----------------------------------------------------------------------
+    // MCP-over-SSE (BE-027): in-memory session store + handshake handler.
+    // Endpoints registered below as part of the routing block.
+    // -----------------------------------------------------------------------
+    builder.Services.AddSingleton<IMcpSessionStore, InMemoryMcpSessionStore>();
+    builder.Services.AddSingleton<McpHandshakeHandler>();
+    builder.Services.AddSingleton<McpResourcesHandler>();
+    builder.Services.AddSingleton<McpToolsHandler>();
+
+    // BE-031: get_relevant_context tool handler. Scoped because it depends on
+    // EF-scoped services (ISkillMatcher, IFileExtractionRepository). Sibling
+    // McpToolsHandler should resolve it from httpContext.RequestServices.
+    builder.Services.AddScoped<ArchMind.Api.Mcp.Tools.GetRelevantContextHandler>();
+
+    // -----------------------------------------------------------------------
     // ASP.NET Core services
     // -----------------------------------------------------------------------
     builder.Services.AddOpenApi();
@@ -228,6 +260,8 @@ try
     app.MapWorkspaceEndpoints();
     app.MapRepoEndpoints();
     app.MapGraphEndpoints();
+    app.MapSkillEndpoints();
+    app.MapMcpEndpoints();
 
     // -----------------------------------------------------------------------
     // Enqueue a one-time job to prove Hangfire is operating.

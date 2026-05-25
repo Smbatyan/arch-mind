@@ -357,6 +357,247 @@ internal sealed class GraphReader : IGraphReader
         return result;
     }
 
+    // PERF: workspace-wide aggregations — one Cypher per label/edge. The
+    // alternative (single MATCH(n) RETURN labels(n)[0]) would not benefit from
+    // our per-label indexes and would scan every partition.
+    public async Task<GraphOverview> GetOverviewAsync(Guid workspaceId, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+
+        var nodeCounts = await CountNodesPerLabelAsync(workspaceId, ct).ConfigureAwait(false);
+
+        var edgeCounts = new Dictionary<string, int>(GraphLabels.Edge.Count, StringComparer.Ordinal);
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+
+        foreach (var edge in GraphLabels.Edge)
+        {
+            // Edge label is allowlisted → safe to interpolate. We scope by
+            // workspace via the endpoints of the edge (both must be in-tenant).
+            var cypher = $$"""
+                MATCH (a {workspace_id: $ws})-[r:{{edge}}]->(b {workspace_id: $ws})
+                RETURN count(r) AS cnt
+            """;
+
+            var raw = await QuerySingleColumnAsync(
+                conn, cypher, new { ws = workspaceId }, "cnt", ct).ConfigureAwait(false);
+
+            edgeCounts[edge] = ParseIntScalar(raw) ?? 0;
+        }
+
+        return new GraphOverview(nodeCounts, edgeCounts);
+    }
+
+    public async Task<ServiceNeighborhood?> GetServiceNeighborhoodAsync(
+        Guid workspaceId, string serviceName, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(serviceName);
+
+        var service = await GetServiceAsync(workspaceId, serviceName, ct).ConfigureAwait(false);
+        if (service is null) return null;
+
+        var endpoints = await GetServiceEndpointsAsync(workspaceId, serviceName, ct).ConfigureAwait(false);
+        var dependencies = await GetServiceDependenciesAsync(workspaceId, serviceName, ct).ConfigureAwait(false);
+
+        const string publishesCypher = """
+            MATCH (s:Service {workspace_id: $ws, name: $name})-[:PUBLISHES]->(e:Event {workspace_id: $ws})
+            RETURN e
+            ORDER BY e.name
+        """;
+
+        const string consumesCypher = """
+            MATCH (s:Service {workspace_id: $ws, name: $name})-[:CONSUMES]->(e:Event {workspace_id: $ws})
+            RETURN e
+            ORDER BY e.name
+        """;
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+
+        var pubRows = await QueryColumnAsync(conn, publishesCypher,
+            new { ws = workspaceId, name = serviceName }, "e", ct).ConfigureAwait(false);
+        var conRows = await QueryColumnAsync(conn, consumesCypher,
+            new { ws = workspaceId, name = serviceName }, "e", ct).ConfigureAwait(false);
+
+        return new ServiceNeighborhood(
+            service,
+            endpoints,
+            dependencies,
+            pubRows.Select(MapEventRef).ToList(),
+            conRows.Select(MapEventRef).ToList());
+    }
+
+    public async Task<IReadOnlyList<EndpointNode>> ListEndpointsAsync(
+        Guid workspaceId, string? serviceName, string? method, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+
+        // Compose cypher dynamically depending on which filters are set. Method
+        // is passed via params (case-insensitive match); service name flows via
+        // params as well.
+        string cypher;
+        object parameters;
+
+        var methodFilter = string.IsNullOrWhiteSpace(method)
+            ? string.Empty
+            : " AND toLower(e.method) = toLower($method)";
+
+        if (!string.IsNullOrWhiteSpace(serviceName))
+        {
+            cypher = $$"""
+                MATCH (s:Service {workspace_id: $ws, name: $name})-[:EXPOSES]->(e:Endpoint {workspace_id: $ws})
+                WHERE true{{methodFilter}}
+                RETURN e
+                ORDER BY e.path, e.method
+            """;
+            parameters = method is null
+                ? new { ws = workspaceId, name = serviceName }
+                : (object)new { ws = workspaceId, name = serviceName, method };
+        }
+        else
+        {
+            cypher = $$"""
+                MATCH (e:Endpoint {workspace_id: $ws})
+                WHERE true{{methodFilter}}
+                RETURN e
+                ORDER BY e.path, e.method
+            """;
+            parameters = method is null
+                ? new { ws = workspaceId }
+                : (object)new { ws = workspaceId, method };
+        }
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+        var rows = await QueryColumnAsync(conn, cypher, parameters, "e", ct).ConfigureAwait(false);
+        return rows.Select(MapEndpoint).ToList();
+    }
+
+    public async Task<IReadOnlyList<EndpointCaller>> FindEndpointCallersByIdAsync(
+        Guid workspaceId, Guid endpointId, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+        if (endpointId == Guid.Empty)
+        {
+            throw new ArgumentException("endpointId must be non-empty.", nameof(endpointId));
+        }
+
+        const string cypher = """
+            MATCH (caller {workspace_id: $ws})-[:CALLS]->(e:Endpoint {workspace_id: $ws, id: $eid})
+            RETURN caller
+        """;
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+        var rows = await QueryColumnAsync(conn, cypher,
+            new { ws = workspaceId, eid = endpointId }, "caller", ct).ConfigureAwait(false);
+
+        return rows.Select(MapCaller).Where(x => x is not null).Cast<EndpointCaller>().ToList();
+    }
+
+    public async Task<IReadOnlyList<EndpointCaller>> FindEndpointCallersByRouteAsync(
+        Guid workspaceId, string method, string path, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(method);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        const string cypher = """
+            MATCH (caller {workspace_id: $ws})-[:CALLS]->(e:Endpoint {workspace_id: $ws})
+            WHERE toLower(e.method) = toLower($method) AND e.path = $path
+            RETURN caller
+        """;
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+        var rows = await QueryColumnAsync(conn, cypher,
+            new { ws = workspaceId, method, path }, "caller", ct).ConfigureAwait(false);
+
+        return rows.Select(MapCaller).Where(x => x is not null).Cast<EndpointCaller>().ToList();
+    }
+
+    private static EndpointCaller? MapCaller(string raw)
+    {
+        using var doc = AgtypeParser.Parse(raw);
+        if (doc is null) return null;
+        var props = doc.RootElement.TryGetProperty("properties", out var p) ? p : default;
+        var label = doc.RootElement.TryGetProperty("label", out var l) && l.ValueKind == JsonValueKind.String
+            ? l.GetString() ?? string.Empty
+            : string.Empty;
+        var id = AgtypeParser.GetGuid(props, "id") ?? Guid.Empty;
+        if (id == Guid.Empty) return null;
+        var name = AgtypeParser.GetString(props, "name");
+        return new EndpointCaller(id, label, name);
+    }
+
+    // PERF: per-label substring scan. AGE cannot index against
+    // CONTAINS predicates, so each label is filtered in Cypher and ranked
+    // client-side. Result set is small (limit-bound).
+    public async Task<IReadOnlyList<NodeSearchHit>> SearchNodesByTextAsync(
+        Guid workspaceId,
+        IEnumerable<string> tokens,
+        int limit,
+        CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+        var tokenList = tokens?
+            .Where(t => !string.IsNullOrWhiteSpace(t))
+            .Select(t => t.Trim().ToLowerInvariant())
+            .Distinct()
+            .ToList() ?? new List<string>();
+        if (tokenList.Count == 0)
+        {
+            return Array.Empty<NodeSearchHit>();
+        }
+
+        if (limit <= 0) limit = 25;
+        if (limit > 500) limit = 500;
+
+        var perLabelLimit = Math.Max(5, limit);
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+
+        var aggregated = new List<NodeSearchHit>();
+
+        foreach (var label in GraphLabels.Vertex)
+        {
+            // Build an OR-chain of CONTAINS predicates over name and description
+            // using positional parameter names ($t0, $t1, …).
+            var predicates = new List<string>(tokenList.Count * 2);
+            var paramDict = new Dictionary<string, object>(StringComparer.Ordinal) { ["ws"] = workspaceId };
+            for (var i = 0; i < tokenList.Count; i++)
+            {
+                var key = $"t{i}";
+                paramDict[key] = tokenList[i];
+                predicates.Add($"toLower(coalesce(n.name, '')) CONTAINS ${key}");
+                predicates.Add($"toLower(coalesce(n.description, '')) CONTAINS ${key}");
+            }
+
+            var cypher = $$"""
+                MATCH (n:{{label}} {workspace_id: $ws})
+                WHERE {{string.Join(" OR ", predicates)}}
+                RETURN n
+                LIMIT {{perLabelLimit}}
+            """;
+
+            var rows = await QueryColumnAsync(conn, cypher, paramDict, "n", ct).ConfigureAwait(false);
+            foreach (var raw in rows)
+            {
+                using var doc = AgtypeParser.Parse(raw);
+                if (doc is null) continue;
+                var props = doc.RootElement.TryGetProperty("properties", out var p) ? p : default;
+                var id = AgtypeParser.GetGuid(props, "id") ?? Guid.Empty;
+                if (id == Guid.Empty) continue;
+                var name = AgtypeParser.GetString(props, "name");
+                var description = AgtypeParser.GetString(props, "description");
+                var propsDict = AgtypeParser.ExtractProperties(raw);
+                aggregated.Add(new NodeSearchHit(id, label, name, description, propsDict));
+                if (aggregated.Count >= limit) break;
+            }
+
+            if (aggregated.Count >= limit) break;
+        }
+
+        return aggregated.Take(limit).ToList();
+    }
+
     // ── Cypher execution helpers ──────────────────────────────────────────
 
     /// <summary>

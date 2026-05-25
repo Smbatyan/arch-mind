@@ -47,4 +47,43 @@ public sealed class FileExtractionRepository : IFileExtractionRepository
             new object[] { workspaceId, repoId, filePath, contentHash, payload },
             ct);
     }
+
+    public async Task<IReadOnlyList<FileExtractionRow>> GetLatestForFilesAsync(
+        Guid workspaceId,
+        IReadOnlyList<string> filePaths,
+        CancellationToken ct = default)
+    {
+        if (filePaths is null || filePaths.Count == 0)
+        {
+            return Array.Empty<FileExtractionRow>();
+        }
+
+        // EF translates Contains() to "= ANY(@p)" against the parameter array
+        // on Npgsql, which keeps the query single-statement and indexable on
+        // (workspace_id, repo_id, file_path).
+        var rows = await _db.FileExtractions
+            .AsNoTracking()
+            .Where(x => x.WorkspaceId == workspaceId && filePaths.Contains(x.FilePath))
+            .Select(x => new { x.FilePath, x.ContentHash, x.ExtractionPayload })
+            .ToListAsync(ct);
+
+        var result = new List<FileExtractionRow>(rows.Count);
+        foreach (var r in rows)
+        {
+            FileExtractionRecord? record;
+            try
+            {
+                record = JsonSerializer.Deserialize<FileExtractionRecord>(r.ExtractionPayload, JsonOptions);
+            }
+            catch (JsonException)
+            {
+                // Skip rows we can't deserialize rather than blowing up the whole
+                // get_relevant_context call.
+                continue;
+            }
+            if (record is null) continue;
+            result.Add(new FileExtractionRow(r.FilePath, r.ContentHash, record));
+        }
+        return result;
+    }
 }

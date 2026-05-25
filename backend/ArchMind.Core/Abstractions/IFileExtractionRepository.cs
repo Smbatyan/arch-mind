@@ -16,4 +16,19 @@ public interface IFileExtractionRepository
         string contentHash,
         FileExtractionRecord record,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// BE-031: fetch the latest extraction payload for each of the given paths.
+    /// Path matching is exact; missing paths are simply omitted from the result.
+    /// </summary>
+    Task<IReadOnlyList<FileExtractionRow>> GetLatestForFilesAsync(
+        Guid workspaceId,
+        IReadOnlyList<string> filePaths,
+        CancellationToken ct = default);
 }
+
+/// <summary>BE-031: read DTO returned by <see cref="IFileExtractionRepository.GetLatestForFilesAsync"/>.</summary>
+public sealed record FileExtractionRow(
+    string FilePath,
+    string ContentHash,
+    FileExtractionRecord Record);

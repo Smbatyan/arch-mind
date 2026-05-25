@@ -18,6 +18,11 @@ public class ArchMindDbContext : DbContext
     public DbSet<FileExtraction> FileExtractions => Set<FileExtraction>();
     public DbSet<ScanRun> ScanRuns => Set<ScanRun>();
     public DbSet<CorrelationConflict> CorrelationConflicts => Set<CorrelationConflict>();
+    public DbSet<WorkspaceApiKey> WorkspaceApiKeys => Set<WorkspaceApiKey>();
+    public DbSet<McpTelemetryEntry> McpTelemetry => Set<McpTelemetryEntry>();
+    public DbSet<LlmCallLog> LlmCallLogs => Set<LlmCallLog>();
+    public DbSet<Skill> Skills => Set<Skill>();
+    public DbSet<SkillRevision> SkillRevisions => Set<SkillRevision>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -339,6 +344,280 @@ public class ArchMindDbContext : DbContext
             b.HasIndex(x => new { x.WorkspaceId, x.RepoId, x.Status, x.CreatedAt })
                 .HasDatabaseName("ix_correlation_conflicts_workspace_repo_status_created_desc")
                 .IsDescending(false, false, false, true);
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-028: bearer tokens used by external MCP clients to authenticate
+        // against a workspace. Plaintext is never stored; we keep a SHA-256
+        // hash and the first 8 chars of the plaintext for display.
+        modelBuilder.Entity<WorkspaceApiKey>(b =>
+        {
+            b.ToTable("workspace_api_keys");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.Name)
+                .HasColumnName("name")
+                .HasMaxLength(200)
+                .IsRequired();
+            b.Property(x => x.KeyHash)
+                .HasColumnName("key_hash")
+                .HasMaxLength(64)
+                .IsRequired();
+            b.Property(x => x.KeyPrefix)
+                .HasColumnName("key_prefix")
+                .HasMaxLength(16)
+                .IsRequired();
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.Property(x => x.LastUsedAt)
+                .HasColumnName("last_used_at")
+                .HasColumnType("timestamp with time zone");
+            b.Property(x => x.RevokedAt)
+                .HasColumnName("revoked_at")
+                .HasColumnType("timestamp with time zone");
+            b.HasIndex(x => new { x.WorkspaceId, x.RevokedAt })
+                .HasDatabaseName("ix_workspace_api_keys_workspace_revoked");
+            b.HasIndex(x => x.KeyHash)
+                .HasDatabaseName("ix_workspace_api_keys_key_hash")
+                .IsUnique();
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-032: one row per inbound MCP request.
+        modelBuilder.Entity<McpTelemetryEntry>(b =>
+        {
+            b.ToTable("mcp_telemetry");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.ApiKeyId)
+                .HasColumnName("api_key_id")
+                .HasColumnType("uuid");
+            b.Property(x => x.Method)
+                .HasColumnName("method")
+                .HasMaxLength(200)
+                .IsRequired();
+            b.Property(x => x.StatusCode)
+                .HasColumnName("status_code")
+                .IsRequired();
+            b.Property(x => x.LatencyMs)
+                .HasColumnName("latency_ms")
+                .IsRequired();
+            b.Property(x => x.RequestSizeBytes)
+                .HasColumnName("request_size_bytes");
+            b.Property(x => x.ResponseSizeBytes)
+                .HasColumnName("response_size_bytes");
+            b.Property(x => x.ErrorMessage)
+                .HasColumnName("error_message")
+                .HasMaxLength(4000);
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.WorkspaceId, x.CreatedAt })
+                .HasDatabaseName("ix_mcp_telemetry_workspace_created_desc")
+                .IsDescending(false, true);
+            b.HasIndex(x => new { x.WorkspaceId, x.Method })
+                .HasDatabaseName("ix_mcp_telemetry_workspace_method");
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-032: one row per outbound Anthropic API call.
+        modelBuilder.Entity<LlmCallLog>(b =>
+        {
+            b.ToTable("llm_call_logs");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.Purpose)
+                .HasColumnName("purpose")
+                .HasMaxLength(100)
+                .IsRequired();
+            b.Property(x => x.Model)
+                .HasColumnName("model")
+                .HasMaxLength(100)
+                .IsRequired();
+            b.Property(x => x.InputTokens)
+                .HasColumnName("input_tokens")
+                .HasDefaultValue(0);
+            b.Property(x => x.OutputTokens)
+                .HasColumnName("output_tokens")
+                .HasDefaultValue(0);
+            b.Property(x => x.CacheReadTokens)
+                .HasColumnName("cache_read_tokens")
+                .HasDefaultValue(0);
+            b.Property(x => x.CacheWriteTokens)
+                .HasColumnName("cache_write_tokens")
+                .HasDefaultValue(0);
+            b.Property(x => x.CostUsd)
+                .HasColumnName("cost_usd")
+                .HasColumnType("numeric(12,6)")
+                .HasDefaultValue(0m);
+            b.Property(x => x.LatencyMs)
+                .HasColumnName("latency_ms")
+                .IsRequired();
+            b.Property(x => x.CacheHit)
+                .HasColumnName("cache_hit")
+                .HasDefaultValue(false);
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.WorkspaceId, x.CreatedAt })
+                .HasDatabaseName("ix_llm_call_logs_workspace_created_desc")
+                .IsDescending(false, true);
+            b.HasIndex(x => new { x.WorkspaceId, x.Purpose })
+                .HasDatabaseName("ix_llm_call_logs_workspace_purpose");
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-033: user-authored skills returned by the MCP get_relevant_context
+        // tool when their triggers match an agent task. Triggers are stored as
+        // a native Postgres text[] (Npgsql maps string[] → text[] by default).
+        modelBuilder.Entity<Skill>(b =>
+        {
+            b.ToTable("skills");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.Name)
+                .HasColumnName("name")
+                .HasMaxLength(64)
+                .IsRequired();
+            b.Property(x => x.Title)
+                .HasColumnName("title")
+                .HasMaxLength(200)
+                .IsRequired();
+            b.Property(x => x.Description)
+                .HasColumnName("description")
+                .HasMaxLength(2000)
+                .IsRequired();
+            b.Property(x => x.Body)
+                .HasColumnName("body")
+                .HasColumnType("text")
+                .IsRequired();
+            b.Property(x => x.Triggers)
+                .HasColumnName("triggers")
+                .HasColumnType("text[]")
+                .IsRequired();
+            b.Property(x => x.Enabled)
+                .HasColumnName("enabled")
+                .HasDefaultValue(true);
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.Property(x => x.UpdatedAt)
+                .HasColumnName("updated_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.WorkspaceId, x.Name })
+                .HasDatabaseName("ix_skills_workspace_name")
+                .IsUnique();
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-033: append-only revision history. (SkillId, Version) is unique so
+        // concurrent updates that race the version counter would fail-fast on
+        // the constraint rather than silently overwrite history.
+        modelBuilder.Entity<SkillRevision>(b =>
+        {
+            b.ToTable("skill_revisions");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.SkillId)
+                .HasColumnName("skill_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.Version)
+                .HasColumnName("version")
+                .IsRequired();
+            b.Property(x => x.Title)
+                .HasColumnName("title")
+                .HasMaxLength(200)
+                .IsRequired();
+            b.Property(x => x.Description)
+                .HasColumnName("description")
+                .HasMaxLength(2000)
+                .IsRequired();
+            b.Property(x => x.Body)
+                .HasColumnName("body")
+                .HasColumnType("text")
+                .IsRequired();
+            b.Property(x => x.Triggers)
+                .HasColumnName("triggers")
+                .HasColumnType("text[]")
+                .IsRequired();
+            b.Property(x => x.Enabled)
+                .HasColumnName("enabled")
+                .IsRequired();
+            b.Property(x => x.ChangeNote)
+                .HasColumnName("change_note")
+                .HasMaxLength(2000)
+                .IsRequired();
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.SkillId, x.Version })
+                .HasDatabaseName("ix_skill_revisions_skill_version")
+                .IsUnique();
+            b.HasIndex(x => new { x.WorkspaceId, x.CreatedAt })
+                .HasDatabaseName("ix_skill_revisions_workspace_created_desc")
+                .IsDescending(false, true);
+            b.HasOne(x => x.Skill)
+                .WithMany()
+                .HasForeignKey(x => x.SkillId)
+                .OnDelete(DeleteBehavior.Cascade);
             b.HasOne(x => x.Workspace)
                 .WithMany()
                 .HasForeignKey(x => x.WorkspaceId)
