@@ -17,6 +17,7 @@ public class ArchMindDbContext : DbContext
     public DbSet<LlmExtractionCacheEntry> LlmExtractionCache => Set<LlmExtractionCacheEntry>();
     public DbSet<FileExtraction> FileExtractions => Set<FileExtraction>();
     public DbSet<ScanRun> ScanRuns => Set<ScanRun>();
+    public DbSet<CorrelationConflict> CorrelationConflicts => Set<CorrelationConflict>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -290,6 +291,54 @@ public class ArchMindDbContext : DbContext
             b.HasIndex(x => new { x.WorkspaceId, x.RepoId, x.StartedAt })
                 .HasDatabaseName("ix_scan_runs_workspace_repo_started_at_desc")
                 .IsDescending(false, false, true);
+            b.HasOne(x => x.Workspace)
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // CorrelationConflict (BE-026): per-conflict row written by the
+        // cross-file correlator for the Sprint 5 clarification engine.
+        modelBuilder.Entity<CorrelationConflict>(b =>
+        {
+            b.ToTable("correlation_conflicts");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.RepoId)
+                .HasColumnName("repo_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.Kind)
+                .HasColumnName("kind")
+                .HasMaxLength(50)
+                .IsRequired();
+            b.Property(x => x.Description)
+                .HasColumnName("description")
+                .HasMaxLength(2000)
+                .IsRequired();
+            b.Property(x => x.Involved)
+                .HasColumnName("involved")
+                .HasColumnType("jsonb")
+                .IsRequired();
+            b.Property(x => x.Status)
+                .HasColumnName("status")
+                .HasMaxLength(20)
+                .HasDefaultValue("open")
+                .IsRequired();
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.WorkspaceId, x.RepoId, x.Status, x.CreatedAt })
+                .HasDatabaseName("ix_correlation_conflicts_workspace_repo_status_created_desc")
+                .IsDescending(false, false, false, true);
             b.HasOne(x => x.Workspace)
                 .WithMany()
                 .HasForeignKey(x => x.WorkspaceId)

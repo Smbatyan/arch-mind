@@ -89,7 +89,12 @@ export function RepoDetailView({
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
-  const [rescanHint, setRescanHint] = React.useState<string | null>(null);
+  const [rescanConfirmOpen, setRescanConfirmOpen] = React.useState(false);
+  const [rescanning, setRescanning] = React.useState(false);
+  const [rescanMessage, setRescanMessage] = React.useState<
+    | { kind: "info" | "error"; text: string }
+    | null
+  >(null);
 
   const scansAvailable = initialScans !== null;
   const sha = shortSha(repo.lastProcessedSha);
@@ -129,13 +134,6 @@ export function RepoDetailView({
     };
   }, [repo.status, slug, repoId, scansAvailable]);
 
-  // Hide rescan hint after 3s
-  React.useEffect(() => {
-    if (!rescanHint) return;
-    const t = setTimeout(() => setRescanHint(null), 3000);
-    return () => clearTimeout(t);
-  }, [rescanHint]);
-
   async function handleDisconnect() {
     setDeleting(true);
     setDeleteError(null);
@@ -154,8 +152,36 @@ export function RepoDetailView({
     }
   }
 
-  function handleRescan() {
-    setRescanHint("Re-scan available in Sprint 3.");
+  async function handleRescan() {
+    setRescanning(true);
+    setRescanMessage(null);
+    try {
+      await api<{ message: string }>(
+        `/api/workspaces/${slug}/repos/${repoId}/rescan`,
+        { method: "POST" }
+      );
+      // Optimistically flip to scanning so polling effect kicks in.
+      setRepo((prev) => ({ ...prev, status: "scanning" }));
+      setRescanConfirmOpen(false);
+      // Refresh server-rendered scan history.
+      router.refresh();
+    } catch (err) {
+      const text =
+        err instanceof Error ? err.message : "Failed to start re-scan.";
+      if (text === "already scanning") {
+        setRescanMessage({
+          kind: "info",
+          text: "Already scanning — please wait.",
+        });
+        // Reflect server state locally so polling resumes.
+        setRepo((prev) => ({ ...prev, status: "scanning" }));
+        setRescanConfirmOpen(false);
+      } else {
+        setRescanMessage({ kind: "error", text });
+      }
+    } finally {
+      setRescanning(false);
+    }
   }
 
   return (
@@ -222,8 +248,11 @@ export function RepoDetailView({
         <Button
           variant="outline"
           size="sm"
-          onClick={handleRescan}
-          disabled={repo.status === "scanning"}
+          onClick={() => {
+            setRescanMessage(null);
+            setRescanConfirmOpen(true);
+          }}
+          disabled={repo.status === "scanning" || rescanning}
         >
           Re-scan
         </Button>
@@ -236,9 +265,11 @@ export function RepoDetailView({
         </Button>
       </div>
 
-      {rescanHint ? (
-        <Alert>
-          <AlertDescription>{rescanHint}</AlertDescription>
+      {rescanMessage ? (
+        <Alert
+          variant={rescanMessage.kind === "error" ? "destructive" : "default"}
+        >
+          <AlertDescription>{rescanMessage.text}</AlertDescription>
         </Alert>
       ) : null}
 
@@ -285,6 +316,35 @@ export function RepoDetailView({
           </CardContent>
         </Card>
       ) : null}
+
+      <AlertDialog
+        open={rescanConfirmOpen}
+        onOpenChange={(open) => {
+          if (!rescanning) setRescanConfirmOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Re-scan repository?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will re-extract the entire repo. The graph stays available
+              during the scan.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={rescanning}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void handleRescan();
+              }}
+              disabled={rescanning}
+            >
+              {rescanning ? "Starting..." : "Re-scan"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <AlertDialogContent>

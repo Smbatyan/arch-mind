@@ -1,4 +1,7 @@
+using ArchMind.Core.Abstractions;
 using ArchMind.Workers.Jobs;
+using ArchMind.Workers.Pipelines;
+using ArchMind.Workers.Polling;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace ArchMind.Workers;
@@ -16,6 +19,20 @@ public static class DependencyInjection
     {
         services.AddScoped<LlmExtractionJob>();
         services.AddScoped<InitialScanJob>();
+        services.AddScoped<DiffScanJob>();
+        services.AddScoped<FullRescanJob>();
+        services.AddScoped<IRepoScanPipeline, RepoScanPipeline>();
+
+        // BE-026: cross-file correlator (Sonnet). Enqueued by the scan pipeline
+        // after per-file extraction has settled.
+        services.AddScoped<CrossFileCorrelationJob>();
+
+        // BE-024: per-repo recurring poll job + registration plumbing.
+        services.AddScoped<PollRepoJob>();
+        services.AddOptions<PollingOptions>().BindConfiguration("Polling");
+        services.AddSingleton<IPollingRegistrar, PollingRegistrar>();
+        services.AddHostedService<PollingStartupSync>();
+
         return services;
     }
 }

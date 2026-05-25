@@ -3,6 +3,7 @@ using System.Text.RegularExpressions;
 using ArchMind.Core.Entities;
 using ArchMind.Infrastructure.Data;
 using ArchMind.Workers.Jobs;
+using ArchMind.Workers.Polling;
 using Hangfire;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -31,6 +32,7 @@ public static partial class RepoEndpoints
         group.MapGet("/", ListAsync);
         group.MapGet("/{id:guid}", GetByIdAsync);
         group.MapGet("/{id:guid}/scans", ListScansAsync);
+        group.MapPost("/{id:guid}/rescan", RescanAsync);
         group.MapDelete("/{id:guid}", DeleteAsync);
 
         return app;
@@ -82,6 +84,7 @@ public static partial class RepoEndpoints
         [FromBody] CreateRepoRequest req,
         ArchMindDbContext db,
         IBackgroundJobClient backgroundJobClient,
+        IPollingRegistrar pollingRegistrar,
         HttpContext httpContext,
         CancellationToken ct)
     {
@@ -136,6 +139,10 @@ public static partial class RepoEndpoints
         // orchestrator itself moves the repo through scanning → scanned/failed.
         backgroundJobClient.Enqueue<InitialScanJob>(
             j => j.RunAsync(workspace.Id, repo.Id, default));
+
+        // BE-024: register the recurring poll for this repo. No-op when
+        // Polling:Enabled = false.
+        pollingRegistrar.RegisterRepo(workspace.Id, repo.Id);
 
         var response = new CreateRepoResponse(
             repo.Id,
@@ -273,10 +280,62 @@ public static partial class RepoEndpoints
         return Results.Ok(scans);
     }
 
+    /// <summary>
+    /// BE-025: enqueue a manual full re-scan of an existing repo. Fire-and-forget
+    /// — the job moves the repo through scanning → scanned/failed itself. The
+    /// LLM extraction cache is reused: same file content + same prompt version
+    /// returns the same answer. Bump the prompt version for a truly fresh run.
+    /// </summary>
+    private static async Task<IResult> RescanAsync(
+        string slug,
+        Guid id,
+        ArchMindDbContext db,
+        IBackgroundJobClient backgroundJobClient,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        if (!httpContext.TryGetCurrentUserId(out var userId))
+        {
+            return Unauthenticated();
+        }
+
+        var workspace = await ResolveMemberWorkspaceAsync(db, slug, userId, ct);
+        if (workspace is null)
+        {
+            return NotFound();
+        }
+
+        var repo = await db.Repos
+            .AsNoTracking()
+            .Where(r => r.WorkspaceId == workspace.Id && r.Id == id)
+            .Select(r => new { r.Id, r.Status })
+            .FirstOrDefaultAsync(ct);
+
+        if (repo is null)
+        {
+            return NotFound();
+        }
+
+        if (string.Equals(repo.Status, "scanning", StringComparison.Ordinal))
+        {
+            return Results.Json(
+                new { error = "already scanning" },
+                statusCode: StatusCodes.Status409Conflict);
+        }
+
+        backgroundJobClient.Enqueue<FullRescanJob>(
+            j => j.RunAsync(workspace.Id, repo.Id, default));
+
+        return Results.Json(
+            new { message = "rescan queued" },
+            statusCode: StatusCodes.Status202Accepted);
+    }
+
     private static async Task<IResult> DeleteAsync(
         string slug,
         Guid id,
         ArchMindDbContext db,
+        IPollingRegistrar pollingRegistrar,
         HttpContext httpContext,
         CancellationToken ct)
     {
@@ -299,6 +358,9 @@ public static partial class RepoEndpoints
         {
             return NotFound();
         }
+
+        // BE-024: remove the recurring poll job for this repo.
+        pollingRegistrar.UnregisterRepo(workspace.Id, id);
 
         // TODO: Enqueue cleanup job to delete working directory (BE-012).
 

@@ -227,6 +227,7 @@ try
     app.MapAuthEndpoints();
     app.MapWorkspaceEndpoints();
     app.MapRepoEndpoints();
+    app.MapGraphEndpoints();
 
     // -----------------------------------------------------------------------
     // Enqueue a one-time job to prove Hangfire is operating.

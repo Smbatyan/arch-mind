@@ -2,8 +2,10 @@ using ArchMind.Core.Abstractions;
 using ArchMind.Core.Extraction;
 using ArchMind.Infrastructure.Anthropic;
 using ArchMind.Infrastructure.Cloning;
+using ArchMind.Infrastructure.Data;
 using ArchMind.Infrastructure.Extraction;
 using ArchMind.Infrastructure.GitHub;
+using ArchMind.Infrastructure.Graph;
 using ArchMind.Infrastructure.Graphify;
 using ArchMind.Infrastructure.Llm;
 using ArchMind.Infrastructure.Services;
@@ -51,6 +53,18 @@ public static class DependencyInjection
             _ => ExtractionPromptLibrary.All);
         services.AddScoped<IFileContentResolver, FileContentResolver>();
         services.AddScoped<IFileExtractionRepository, FileExtractionRepository>();
+
+        // BE-021: Dapper-backed graph write API over Apache AGE.
+        // NpgsqlConnectionFactory is singleton (only holds the connection
+        // string); GraphWriter is scoped so callers can pull it inside a
+        // request/job lifetime.
+        services.AddSingleton<IDbConnectionFactory, NpgsqlConnectionFactory>();
+        services.AddScoped<IGraphWriter, GraphWriter>();
+
+        // BE-022: Dapper-backed graph read API over Apache AGE. Shares the
+        // IDbConnectionFactory registered above (LOAD 'age' + search_path
+        // bootstrap runs per-connection there).
+        services.AddScoped<IGraphReader, GraphReader>();
 
         return services;
     }

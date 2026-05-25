@@ -33,6 +33,36 @@ Once the stack is up:
 
 Check service health with `docker compose ps` and tail logs with `docker compose logs -f`.
 
+## Configuration
+
+### Polling cadence
+
+The backend periodically polls each tracked repo for changes via a Hangfire recurring job. Cadence is controlled by two settings:
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `Polling:CronExpression` | `*/30 * * * *` | Cron schedule (5-field: minute hour day-of-month month day-of-week) |
+| `Polling:Enabled` | `true` | Master switch for polling jobs |
+
+Set via environment variables (double underscore separator):
+
+```bash
+Polling__CronExpression="*/15 * * * *"   # every 15 minutes
+Polling__CronExpression="0 * * * *"      # every hour
+Polling__Enabled=false                   # disable polling entirely
+```
+
+Or in `appsettings.json`:
+
+```json
+"Polling": { "CronExpression": "*/30 * * * *", "Enabled": true }
+```
+
+Notes:
+
+- Changes take effect on backend restart — the recurring job is registered at startup. Runtime reconfiguration is post-MVP.
+- The cron expression is global per workspace; all repos share the same cadence (jobs themselves run per-repo). Per-repo cron customization is post-MVP.
+
 ## Project structure
 
 ```
