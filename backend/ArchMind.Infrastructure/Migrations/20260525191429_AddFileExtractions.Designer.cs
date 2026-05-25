@@ -3,6 +3,7 @@ using System;
 using ArchMind.Infrastructure.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace ArchMind.Infrastructure.Migrations
 {
     [DbContext(typeof(ArchMindDbContext))]
-    partial class ArchMindDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260525191429_AddFileExtractions")]
+    partial class AddFileExtractions
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -193,108 +196,6 @@ namespace ArchMind.Infrastructure.Migrations
                     b.ToTable("repos", (string)null);
                 });
 
-            modelBuilder.Entity("ArchMind.Core.Entities.ScanRun", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid")
-                        .HasColumnName("id")
-                        .HasDefaultValueSql("gen_random_uuid()");
-
-                    b.Property<DateTime?>("CompletedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("completed_at");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("created_at")
-                        .HasDefaultValueSql("now()");
-
-                    b.Property<string>("ErrorMessage")
-                        .HasMaxLength(4000)
-                        .HasColumnType("character varying(4000)")
-                        .HasColumnName("error_message");
-
-                    b.Property<int>("FilesEnqueued")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("files_enqueued");
-
-                    b.Property<int>("FilesScanned")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("files_scanned");
-
-                    b.Property<string>("FromSha")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("from_sha");
-
-                    b.Property<int>("GraphifyEdges")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("graphify_edges");
-
-                    b.Property<int>("GraphifyNodes")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("integer")
-                        .HasDefaultValue(0)
-                        .HasColumnName("graphify_nodes");
-
-                    b.Property<string>("Kind")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("kind");
-
-                    b.Property<Guid>("RepoId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("repo_id");
-
-                    b.Property<DateTime>("StartedAt")
-                        .HasColumnType("timestamp with time zone")
-                        .HasColumnName("started_at");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(20)
-                        .HasColumnType("character varying(20)")
-                        .HasColumnName("status");
-
-                    b.Property<string>("ToSha")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)")
-                        .HasColumnName("to_sha");
-
-                    b.Property<decimal>("TotalCostUsd")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("numeric(10,6)")
-                        .HasDefaultValue(0m)
-                        .HasColumnName("total_cost_usd");
-
-                    b.Property<long>("TotalTokens")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("bigint")
-                        .HasDefaultValue(0L)
-                        .HasColumnName("total_tokens");
-
-                    b.Property<Guid>("WorkspaceId")
-                        .HasColumnType("uuid")
-                        .HasColumnName("workspace_id");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("WorkspaceId", "RepoId", "StartedAt")
-                        .IsDescending(false, false, true)
-                        .HasDatabaseName("ix_scan_runs_workspace_repo_started_at_desc");
-
-                    b.ToTable("scan_runs", (string)null);
-                });
-
             modelBuilder.Entity("ArchMind.Core.Entities.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -408,17 +309,6 @@ namespace ArchMind.Infrastructure.Migrations
                 });
 
             modelBuilder.Entity("ArchMind.Core.Entities.Repo", b =>
-                {
-                    b.HasOne("ArchMind.Core.Entities.Workspace", "Workspace")
-                        .WithMany()
-                        .HasForeignKey("WorkspaceId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("Workspace");
-                });
-
-            modelBuilder.Entity("ArchMind.Core.Entities.ScanRun", b =>
                 {
                     b.HasOne("ArchMind.Core.Entities.Workspace", "Workspace")
                         .WithMany()

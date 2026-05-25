@@ -14,10 +14,28 @@ RUN dotnet publish ArchMind.Api/ArchMind.Api.csproj -c Release -o /out
 FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 
-# git is needed at runtime for repository cloning
+# Runtime dependencies:
+# - git: cloning repositories for ingestion
+# - python3 / venv / pip: hosts the Graphify CLI (invoked as a subprocess by the .NET app)
+# - build-essential, pkg-config: required to compile tree-sitter grammars during Graphify install
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git \
+    && apt-get install -y --no-install-recommends \
+        git \
+        python3 \
+        python3-pip \
+        python3-venv \
+        build-essential \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Graphify (https://github.com/safishamsi/graphify) into an isolated venv,
+# then expose its entrypoint on PATH so the backend can invoke `graphify` directly.
+RUN python3 -m venv /opt/graphify-venv \
+    && /opt/graphify-venv/bin/pip install --no-cache-dir git+https://github.com/safishamsi/graphify.git
+RUN ln -s /opt/graphify-venv/bin/graphify /usr/local/bin/graphify
+
+# Smoke-test: fail the image build immediately if the CLI is missing or broken.
+RUN graphify --help > /dev/null && echo "graphify installed OK"
 
 COPY --from=build /out /app
 

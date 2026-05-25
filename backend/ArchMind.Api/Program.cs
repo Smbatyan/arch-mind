@@ -2,8 +2,10 @@ using ArchMind.Api.Auth;
 using ArchMind.Api.Endpoints;
 using ArchMind.Api.Middleware;
 using ArchMind.Core.Abstractions;
+using ArchMind.Infrastructure;
 using ArchMind.Infrastructure.Auth;
 using ArchMind.Infrastructure.Data;
+using ArchMind.Workers;
 using Hangfire;
 using Hangfire.PostgreSql;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -141,6 +143,12 @@ try
     });
 
     // -----------------------------------------------------------------------
+    // Infrastructure: GitHub, Anthropic, LLM router, cache
+    // -----------------------------------------------------------------------
+    builder.Services.AddArchMindInfrastructure();
+    builder.Services.AddArchMindWorkers();
+
+    // -----------------------------------------------------------------------
     // ASP.NET Core services
     // -----------------------------------------------------------------------
     builder.Services.AddOpenApi();
@@ -218,6 +226,7 @@ try
 
     app.MapAuthEndpoints();
     app.MapWorkspaceEndpoints();
+    app.MapRepoEndpoints();
 
     // -----------------------------------------------------------------------
     // Enqueue a one-time job to prove Hangfire is operating.

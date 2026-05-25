@@ -74,6 +74,7 @@ The backend listens on <http://localhost:5000> and the admin UI on <http://local
 - **`Port 5432 / 5000 / 3000 already in use`** — stop the conflicting local service, or change the host-side port mapping in `docker-compose.yml`.
 - **AGE extension not loading** — confirm the `apache/age:PG16_latest` image was pulled successfully (`docker compose pull postgres`) and that `infra/postgres-init.sql` runs on first start. Init scripts only execute on an empty data volume; remove the Postgres volume (`docker compose down -v`) if you changed init SQL after the first boot. If AGE queries fail, run `./infra/age-smoke-test.sh` to verify setup.
 - **Backend can't reach Postgres** — verify the Postgres container reports healthy via `docker compose ps`. The backend waits on the health check; if Postgres is unhealthy, inspect logs with `docker compose logs postgres`.
+- **`graphify` is missing or broken in the backend container** — rebuild with `docker compose build --no-cache backend`. The Graphify CLI is installed from <https://github.com/safishamsi/graphify> during image build.
 
 ## Status
 
