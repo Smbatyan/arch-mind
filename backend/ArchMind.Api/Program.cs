@@ -261,6 +261,7 @@ try
     app.MapRepoEndpoints();
     app.MapGraphEndpoints();
     app.MapSkillEndpoints();
+    app.MapClarificationEndpoints();
     app.MapMcpEndpoints();
 
     // -----------------------------------------------------------------------

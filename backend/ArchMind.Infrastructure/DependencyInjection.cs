@@ -2,6 +2,7 @@ using ArchMind.Core.Abstractions;
 using ArchMind.Core.Extraction;
 using ArchMind.Infrastructure.Anthropic;
 using ArchMind.Infrastructure.Auth;
+using ArchMind.Infrastructure.Clarifications;
 using ArchMind.Infrastructure.Cloning;
 using ArchMind.Infrastructure.Data;
 using ArchMind.Infrastructure.Extraction;
@@ -76,6 +77,21 @@ public static class DependencyInjection
 
         // BE-035: heuristic skill matcher (no embeddings yet).
         services.AddScoped<ISkillMatcher, ArchMind.Infrastructure.Skills.SkillMatcher>();
+
+        // BE-041 (Sprint 5): clarification dedupe-insert writer.
+        services.AddScoped<IClarificationWriter, ClarificationWriter>();
+
+        // BE-036 (Sprint 5): LLM-backed clarifying question generator (Haiku).
+        services.AddScoped<IClarificationQuestionGenerator, ClarificationQuestionGenerator>();
+
+        // BE-038 (Sprint 5): clarification prioritizer + orchestration intake.
+        services.AddScoped<IClarificationPrioritizer, ClarificationPrioritizer>();
+        services.AddScoped<IClarificationIntake, ClarificationIntakeService>();
+
+        // BE-040 (Sprint 5): lookup of answered clarifications relevant to a
+        // file under extraction. Consumed by LlmExtractionJob to inject ground
+        // truth into the user prompt.
+        services.AddScoped<IAnsweredClarificationLookup, AnsweredClarificationLookup>();
 
         return services;
     }

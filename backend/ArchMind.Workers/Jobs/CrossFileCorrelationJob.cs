@@ -7,6 +7,7 @@ using ArchMind.Infrastructure.Data;
 using Hangfire;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using ArchMind.Core.Entities;
 using ConflictRow = ArchMind.Core.Entities.CorrelationConflict;
 using FileExtractionRow = ArchMind.Core.Entities.FileExtraction;
 
@@ -126,6 +127,8 @@ public sealed class CrossFileCorrelationJob
     private readonly IGraphReader _graphReader;
     private readonly ArchMindDbContext _db;
     private readonly ILlmExtractionCacheService _cache;
+    private readonly IClarificationIntake _clarificationIntake;
+    private readonly IClarificationQuestionGenerator _questionGenerator;
     private readonly ILogger<CrossFileCorrelationJob> _logger;
 
     public CrossFileCorrelationJob(
@@ -134,6 +137,8 @@ public sealed class CrossFileCorrelationJob
         IGraphReader graphReader,
         ArchMindDbContext db,
         ILlmExtractionCacheService cache,
+        IClarificationIntake clarificationIntake,
+        IClarificationQuestionGenerator questionGenerator,
         ILogger<CrossFileCorrelationJob> logger)
     {
         _router = router;
@@ -141,6 +146,8 @@ public sealed class CrossFileCorrelationJob
         _graphReader = graphReader;
         _db = db;
         _cache = cache;
+        _clarificationIntake = clarificationIntake;
+        _questionGenerator = questionGenerator;
         _logger = logger;
     }
 
@@ -238,6 +245,7 @@ public sealed class CrossFileCorrelationJob
         // 4. Apply the result.
         await ApplyToGraphAsync(workspaceId, repoId, result, ct);
         await PersistConflictsAsync(workspaceId, repoId, result, ct);
+        await EmitClarificationsAsync(workspaceId, repoId, result, ct);
 
         // 5. Telemetry. scan_runs has no correlation_run_at column today
         // (Sprint 4 telemetry expansion); skip per spec.
@@ -398,6 +406,275 @@ public sealed class CrossFileCorrelationJob
 
         _db.CorrelationConflicts.AddRange(rows);
         await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// BE-036 + BE-038 + BE-041 (Sprint 5): for each correlator-emitted conflict,
+    /// ask <see cref="IClarificationQuestionGenerator"/> (Haiku) for the minimum
+    /// set of clarifying questions grounded in the conflict's evidence. Each
+    /// returned question becomes one <see cref="Clarification"/> candidate
+    /// submitted via <see cref="IClarificationIntake"/> (which scores priority
+    /// and dedupe-inserts through the writer). When the generator returns no
+    /// questions, falls back to a single heuristic clarification per conflict
+    /// using the conflict description as the question.
+    /// </summary>
+    private async Task EmitClarificationsAsync(
+        Guid workspaceId,
+        Guid repoId,
+        CorrelationResult result,
+        CancellationToken ct)
+    {
+        if (result.Conflicts.Count == 0) return;
+
+        // service name -> source files, for RelatedFilePaths enrichment.
+        var serviceFiles = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        foreach (var svc in result.Services)
+        {
+            if (string.IsNullOrWhiteSpace(svc.Name)) continue;
+            serviceFiles[svc.Name] = svc.SourceFiles ?? Array.Empty<string>();
+        }
+
+        foreach (var c in result.Conflicts)
+        {
+            var kind = (c.Kind ?? string.Empty).Trim();
+            if (kind.Length == 0) continue;
+
+            var involved = (c.InvolvedServices ?? Array.Empty<string>())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+
+            var description = (c.Description ?? string.Empty).Trim();
+
+            var relatedFiles = involved
+                .SelectMany(s => serviceFiles.TryGetValue(s, out var fs) ? fs : Array.Empty<string>())
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(p => p, StringComparer.Ordinal)
+                .ToArray();
+
+            var evidenceMd = BuildConflictContextMarkdown(kind, description, involved, serviceFiles);
+
+            // 1. Ask the LLM for grounded clarifying questions.
+            IReadOnlyList<GeneratedQuestion> generated;
+            try
+            {
+                var evidence = new ClarificationEvidence(
+                    Subject: kind,
+                    EvidenceMarkdown: evidenceMd,
+                    RelatedFilePaths: relatedFiles,
+                    RelatedNodeNames: involved);
+
+                generated = await _questionGenerator.GenerateAsync(
+                    workspaceId, repoId, evidence, ct);
+            }
+            catch (Exception ex)
+            {
+                // Defensive — generator itself swallows most errors, but never
+                // let a single conflict's LLM hiccup block the rest.
+                _logger.LogWarning(
+                    ex,
+                    "Clarification question generation threw workspace={WorkspaceId} repo={RepoId} kind={Kind}; falling back to heuristic",
+                    workspaceId, repoId, kind);
+                generated = Array.Empty<GeneratedQuestion>();
+            }
+
+            if (generated.Count > 0)
+            {
+                foreach (var q in generated)
+                {
+                    await SubmitGeneratedAsync(
+                        workspaceId, repoId, kind, evidenceMd, relatedFiles, involved, q, ct);
+                }
+            }
+            else
+            {
+                await SubmitHeuristicAsync(
+                    workspaceId, repoId, kind, description, evidenceMd, relatedFiles, involved, ct);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Submit one <see cref="Clarification"/> built from an LLM-generated
+    /// question. The generator's topic / question / choices / severity take
+    /// precedence; related-file / related-node lists are intersected with the
+    /// conflict's resolved evidence so we can never invent a path the
+    /// correlator didn't see.
+    /// </summary>
+    private async Task SubmitGeneratedAsync(
+        Guid workspaceId,
+        Guid repoId,
+        string conflictKind,
+        string evidenceMd,
+        IReadOnlyList<string> conflictFiles,
+        IReadOnlyList<string> conflictNodes,
+        GeneratedQuestion q,
+        CancellationToken ct)
+    {
+        var topic = Truncate(string.IsNullOrWhiteSpace(q.Topic) ? conflictKind : q.Topic, 200);
+        var question = Truncate(q.Question ?? string.Empty, 2000);
+        if (question.Length == 0) return;
+
+        var conflictFileSet = new HashSet<string>(conflictFiles, StringComparer.Ordinal);
+        var conflictNodeSet = new HashSet<string>(conflictNodes, StringComparer.Ordinal);
+
+        var generatedFiles = (q.RelatedFilePaths ?? Array.Empty<string>())
+            .Where(p => !string.IsNullOrWhiteSpace(p) && conflictFileSet.Contains(p))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToArray();
+
+        // If generator referenced no in-evidence files, fall back to the full
+        // conflict file set so downstream consumers still get pointers.
+        var relatedFiles = generatedFiles.Length > 0 ? generatedFiles : conflictFiles.ToArray();
+
+        var generatedNodes = (q.RelatedNodeNames ?? Array.Empty<string>())
+            .Where(n => !string.IsNullOrWhiteSpace(n) && conflictNodeSet.Contains(n))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var relatedNodes = generatedNodes.Length > 0 ? generatedNodes : conflictNodes.ToArray();
+
+        var choices = (q.Choices ?? Array.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Take(5)
+            .Select(s => (string?)s)
+            .ToArray();
+
+        var fingerprint = ComputeFingerprint(workspaceId, topic, question, relatedFiles);
+
+        var clarification = new Clarification
+        {
+            WorkspaceId = workspaceId,
+            RepoId = repoId,
+            Source = ClarificationSource.CrossFileCorrelation,
+            Topic = topic,
+            Question = question,
+            Context = evidenceMd,
+            Choices = choices,
+            Priority = 50, // intake recomputes
+            Status = ClarificationStatus.Open,
+            RelatedFilePaths = relatedFiles,
+            RelatedNodeNames = relatedNodes,
+            Fingerprint = fingerprint,
+        };
+
+        try
+        {
+            await _clarificationIntake.SubmitAsync(clarification, q.Severity ?? "medium", ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to submit generated clarification workspace={WorkspaceId} repo={RepoId} topic={Topic} fingerprint={Fingerprint}",
+                workspaceId, repoId, topic, fingerprint);
+        }
+    }
+
+    /// <summary>
+    /// Heuristic fallback used when the question generator declined to emit
+    /// any questions (returned empty). Mirrors the pre-BE-036 behaviour:
+    /// one clarification per conflict, severity "medium" by default.
+    /// </summary>
+    private async Task SubmitHeuristicAsync(
+        Guid workspaceId,
+        Guid repoId,
+        string conflictKind,
+        string description,
+        string evidenceMd,
+        IReadOnlyList<string> relatedFiles,
+        IReadOnlyList<string> involved,
+        CancellationToken ct)
+    {
+        var topic = Truncate(conflictKind, 200);
+        var question = description.Length > 0
+            ? Truncate(description, 2000)
+            : Truncate($"Files disagree on {conflictKind}. Which is correct?", 2000);
+
+        var choices = involved
+            .Take(5)
+            .Select(s => (string?)s)
+            .ToArray();
+
+        var fingerprint = ComputeFingerprint(workspaceId, topic, question, relatedFiles);
+
+        var clarification = new Clarification
+        {
+            WorkspaceId = workspaceId,
+            RepoId = repoId,
+            Source = ClarificationSource.CrossFileCorrelation,
+            Topic = topic,
+            Question = question,
+            Context = evidenceMd,
+            Choices = choices,
+            Priority = 50, // intake recomputes
+            Status = ClarificationStatus.Open,
+            RelatedFilePaths = relatedFiles is string[] arr ? arr : relatedFiles.ToArray(),
+            RelatedNodeNames = involved is string[] iarr ? iarr : involved.ToArray(),
+            Fingerprint = fingerprint,
+        };
+
+        try
+        {
+            await _clarificationIntake.SubmitAsync(clarification, "medium", ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to submit heuristic clarification workspace={WorkspaceId} repo={RepoId} kind={Kind} fingerprint={Fingerprint}",
+                workspaceId, repoId, conflictKind, fingerprint);
+        }
+    }
+
+    private static string BuildConflictContextMarkdown(
+        string kind,
+        string description,
+        IReadOnlyList<string> involved,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> serviceFiles)
+    {
+        var sb = new StringBuilder();
+        sb.Append("**Conflict kind:** `").Append(kind).Append("`\n\n");
+        if (description.Length > 0)
+        {
+            sb.Append(description).Append("\n\n");
+        }
+        if (involved.Count > 0)
+        {
+            sb.Append("**Involved services / asserted by:**\n\n");
+            foreach (var svc in involved)
+            {
+                sb.Append("- `").Append(svc).Append('`');
+                if (serviceFiles.TryGetValue(svc, out var files) && files.Count > 0)
+                {
+                    sb.Append(" — ");
+                    sb.Append(string.Join(", ", files.Take(3).Select(f => "`" + f + "`")));
+                    if (files.Count > 3) sb.Append(", …");
+                }
+                sb.Append('\n');
+            }
+        }
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Fingerprint key (per BE-036 spec):
+    /// <c>SHA-256(workspaceId | topic | question | sorted-related-files)</c>.
+    /// Including the question text disambiguates multiple generator-emitted
+    /// questions sharing the same topic + file set.
+    /// </summary>
+    private static string ComputeFingerprint(
+        Guid workspaceId,
+        string topic,
+        string question,
+        IReadOnlyList<string> sortedRelatedFiles)
+    {
+        var files = sortedRelatedFiles.Count == 0
+            ? string.Empty
+            : string.Join("|", sortedRelatedFiles.OrderBy(p => p, StringComparer.Ordinal));
+        var raw = $"{workspaceId:N}|{topic}|{question}|{files}";
+        return ComputeSha256Hex(raw);
     }
 
     /// <summary>

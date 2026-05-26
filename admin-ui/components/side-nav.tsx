@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { KeyIcon, SparklesIcon } from "lucide-react";
+import { KeyIcon, MessageCircleQuestion, SparklesIcon } from "lucide-react";
 
 type NavItem = { label: string; href: string; icon?: React.ReactNode };
 
@@ -14,6 +14,11 @@ function buildItems(slug: string | null): NavItem[] {
       label: "Skills",
       href: "/workspaces",
       icon: <SparklesIcon className="size-3.5" />,
+    },
+    {
+      label: "Clarifications",
+      href: slug ? `/workspaces/${slug}/clarifications` : "/workspaces",
+      icon: <MessageCircleQuestion className="size-3.5" />,
     },
     { label: "Questions", href: "/workspaces" },
     { label: "Graph", href: "/workspaces" },

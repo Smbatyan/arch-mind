@@ -23,6 +23,7 @@ public class ArchMindDbContext : DbContext
     public DbSet<LlmCallLog> LlmCallLogs => Set<LlmCallLog>();
     public DbSet<Skill> Skills => Set<Skill>();
     public DbSet<SkillRevision> SkillRevisions => Set<SkillRevision>();
+    public DbSet<Clarification> Clarifications => Set<Clarification>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -622,6 +623,102 @@ public class ArchMindDbContext : DbContext
                 .WithMany()
                 .HasForeignKey(x => x.WorkspaceId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // BE-037 (Sprint 5): clarifications — open questions surfaced to a
+        // human reviewer when extraction or cross-file correlation can't
+        // decide on its own. Enum columns stored as strings; text[] for
+        // Choices/RelatedFilePaths/RelatedNodeNames; partial unique index on
+        // (workspace_id, fingerprint) WHERE fingerprint IS NOT NULL so we can
+        // dedupe candidates without disallowing the null sentinel.
+        modelBuilder.Entity<Clarification>(b =>
+        {
+            b.ToTable("clarifications");
+            b.HasKey(x => x.Id);
+            b.Property(x => x.Id)
+                .HasColumnName("id")
+                .HasColumnType("uuid")
+                .HasDefaultValueSql("gen_random_uuid()");
+            b.Property(x => x.WorkspaceId)
+                .HasColumnName("workspace_id")
+                .HasColumnType("uuid")
+                .IsRequired();
+            b.Property(x => x.RepoId)
+                .HasColumnName("repo_id")
+                .HasColumnType("uuid");
+            b.Property(x => x.Source)
+                .HasColumnName("source")
+                .HasMaxLength(50)
+                .HasConversion<string>()
+                .IsRequired();
+            b.Property(x => x.Topic)
+                .HasColumnName("topic")
+                .HasMaxLength(200)
+                .IsRequired();
+            b.Property(x => x.Question)
+                .HasColumnName("question")
+                .HasMaxLength(2000)
+                .IsRequired();
+            b.Property(x => x.Context)
+                .HasColumnName("context")
+                .HasColumnType("text");
+            b.Property(x => x.Choices)
+                .HasColumnName("choices")
+                .HasColumnType("text[]")
+                .IsRequired();
+            b.Property(x => x.Priority)
+                .HasColumnName("priority")
+                .HasDefaultValue(50)
+                .IsRequired();
+            b.Property(x => x.Status)
+                .HasColumnName("status")
+                .HasMaxLength(50)
+                .HasConversion<string>()
+                .HasDefaultValue(ClarificationStatus.Open)
+                .IsRequired();
+            b.Property(x => x.Answer)
+                .HasColumnName("answer")
+                .HasColumnType("text");
+            b.Property(x => x.AnsweredByUserId)
+                .HasColumnName("answered_by_user_id")
+                .HasMaxLength(320);
+            b.Property(x => x.AnsweredAt)
+                .HasColumnName("answered_at")
+                .HasColumnType("timestamp with time zone");
+            b.Property(x => x.RelatedFilePaths)
+                .HasColumnName("related_file_paths")
+                .HasColumnType("text[]")
+                .IsRequired();
+            b.Property(x => x.RelatedNodeNames)
+                .HasColumnName("related_node_names")
+                .HasColumnType("text[]")
+                .IsRequired();
+            b.Property(x => x.Fingerprint)
+                .HasColumnName("fingerprint")
+                .HasMaxLength(128);
+            b.Property(x => x.CreatedAt)
+                .HasColumnName("created_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.Property(x => x.UpdatedAt)
+                .HasColumnName("updated_at")
+                .HasColumnType("timestamp with time zone")
+                .HasDefaultValueSql("now()");
+            b.HasIndex(x => new { x.WorkspaceId, x.Status, x.Priority })
+                .HasDatabaseName("ix_clarifications_workspace_status_priority_desc")
+                .IsDescending(false, false, true);
+            b.HasIndex(x => new { x.WorkspaceId, x.Fingerprint })
+                .HasDatabaseName("ix_clarifications_workspace_fingerprint")
+                .IsUnique()
+                .HasFilter("fingerprint IS NOT NULL");
+            b.HasOne<Workspace>()
+                .WithMany()
+                .HasForeignKey(x => x.WorkspaceId)
+                .OnDelete(DeleteBehavior.Cascade);
+            b.HasOne<Repo>()
+                .WithMany()
+                .HasForeignKey(x => x.RepoId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
     }
 }

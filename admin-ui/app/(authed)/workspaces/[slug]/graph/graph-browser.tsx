@@ -7,6 +7,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { NodeClarificationsPanel } from "@/components/node-clarifications-panel";
 
 // ---------------------------------------------------------------------------
 // Types — mirror the backend DTOs from GraphEndpoints.cs.
@@ -503,6 +504,14 @@ function DetailPane({
         direction="in"
         onSelectNode={onSelectNode}
       />
+
+      {typeof detail.properties.name === "string" &&
+      (detail.properties.name as string).length > 0 ? (
+        <NodeClarificationsPanel
+          slug={slug}
+          nodeName={detail.properties.name as string}
+        />
+      ) : null}
     </section>
   );
 }

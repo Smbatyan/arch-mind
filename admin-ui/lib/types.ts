@@ -61,3 +61,30 @@ export type SkillRevision = SkillRevisionSummary & {
   triggers: string[];
   enabled: boolean;
 };
+
+/** Status of a clarification request as exposed by the API. */
+export type ClarificationStatus = "Open" | "Answered" | "Dismissed";
+
+/** Source pipeline that generated a clarification. */
+export type ClarificationSource =
+  | "FileExtraction"
+  | "CrossFileCorrelation"
+  | "ManualLlmGen";
+
+/** Clarification record returned by the Sprint 5 clarifications API. */
+export interface Clarification {
+  id: string;
+  source: ClarificationSource;
+  topic: string;
+  question: string;
+  context: string | null;
+  choices: string[];
+  priority: number;
+  status: ClarificationStatus;
+  answer: string | null;
+  answeredAt: string | null;
+  relatedFilePaths: string[];
+  relatedNodeNames: string[];
+  createdAt: string;
+  updatedAt: string;
+}

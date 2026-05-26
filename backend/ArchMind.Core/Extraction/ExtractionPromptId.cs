@@ -12,5 +12,12 @@ public enum ExtractionPromptId
     ExtractEventPublishers,
     ExtractEventConsumers,
     ExtractStorageOwnership,
-    InferConventions
+    InferConventions,
+
+    /// <summary>
+    /// BE-036 (Sprint 5): asks Haiku to generate the minimum-viable set of
+    /// clarifying questions from an evidence block (extraction snippets,
+    /// conflicting values). Output goes through <c>IClarificationQuestionGenerator</c>.
+    /// </summary>
+    QuestionGeneration
 }

@@ -33,6 +33,11 @@ public static class DependencyInjection
         services.AddSingleton<IPollingRegistrar, PollingRegistrar>();
         services.AddHostedService<PollingStartupSync>();
 
+        // BE-042: per-workspace recurring clarification sweep + startup sync.
+        services.AddScoped<ClarificationCandidateSweepJob>();
+        services.AddSingleton<IClarificationSweepRegistrar, ClarificationSweepRegistrar>();
+        services.AddHostedService<ClarificationSweepStartupSync>();
+
         return services;
     }
 }

@@ -28,6 +28,7 @@ public static class ExtractionPromptLibrary
             [ExtractionPromptId.ExtractEventConsumers] = BuildExtractEventConsumers(),
             [ExtractionPromptId.ExtractStorageOwnership] = BuildExtractStorageOwnership(),
             [ExtractionPromptId.InferConventions] = BuildInferConventions(),
+            [ExtractionPromptId.QuestionGeneration] = BuildQuestionGeneration(),
         };
         return new ReadOnlyDictionary<ExtractionPromptId, ExtractionPrompt>(map);
     }
@@ -410,6 +411,76 @@ public static class ExtractionPromptLibrary
                       "Category": { "type": "string" },
                       "Name": { "type": "string" },
                       "Description": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+    // -----------------------------------------------------------------------
+    // QuestionGeneration (BE-036, Sprint 5)
+    // -----------------------------------------------------------------------
+    private static ExtractionPrompt BuildQuestionGeneration() => new(
+        Id: ExtractionPromptId.QuestionGeneration,
+        Version: CurrentVersion,
+        ToolName: "record_questions",
+        ToolDescription: "Record the minimum set of clarifying questions a human owner can answer to resolve real ambiguity in the supplied evidence.",
+        SystemPrompt: """
+            You are a senior engineer reviewing extracted architectural metadata.
+            Your job: ask the *minimum* set of clarifying questions a human owner
+            could answer to resolve real ambiguity. NEVER ask cosmetic questions.
+            Output JSON via the provided tool.
+
+            Rules:
+            - Prefer FEWER, higher-signal questions. Zero questions is a valid
+              answer when the evidence is unambiguous.
+            - Each question must be answerable by a human owner without reading
+              the entire repository — cite concrete file paths or node names.
+            - Each question should be a single concrete question, <= 200 chars.
+            - Provide multiple-choice `choices` (2-5 entries) only when the
+              ambiguity is genuinely categorical (e.g. service ownership). Skip
+              `choices` for open-ended questions.
+            - `severity` reflects blast radius: "high" = architectural decision
+              affecting multiple services; "medium" = single-service ownership /
+              boundary; "low" = naming / docs.
+            - `related_files` / `related_nodes` MUST be a subset of the evidence.
+            - Never emit a question whose answer is already obvious in evidence.
+            """,
+        UserPromptTemplate: """
+            Subject: {subject}
+
+            Evidence:
+            {evidence_markdown}
+
+            Related files (for grounding):
+            {related_files}
+
+            Related nodes (for grounding):
+            {related_nodes}
+
+            Emit the minimum set of clarifying questions. Zero is acceptable.
+            """,
+        OutputJsonSchema: """
+            {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["questions"],
+              "properties": {
+                "questions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["topic", "question", "severity"],
+                    "properties": {
+                      "topic": { "type": "string", "description": "Short subject label, e.g. 'OrdersService.publishes'" },
+                      "question": { "type": "string", "description": "Single concrete question, <=200 chars" },
+                      "choices": { "type": "array", "items": { "type": "string" }, "description": "Optional. 2-5 candidate answers if multiple-choice helps." },
+                      "severity": { "type": "string", "enum": ["low", "medium", "high"] },
+                      "related_files": { "type": "array", "items": { "type": "string" } },
+                      "related_nodes": { "type": "array", "items": { "type": "string" } }
                     }
                   }
                 }

@@ -25,6 +25,7 @@ public sealed class LlmExtractionJob
     private readonly IFileContentResolver _files;
     private readonly IFileExtractionRepository _repository;
     private readonly IGraphWriter _graphWriter;
+    private readonly IAnsweredClarificationLookup _clarifications;
     private readonly IReadOnlyDictionary<ExtractionPromptId, ExtractionPrompt> _prompts;
     private readonly ILogger<LlmExtractionJob> _logger;
 
@@ -34,6 +35,7 @@ public sealed class LlmExtractionJob
         IFileContentResolver files,
         IFileExtractionRepository repository,
         IGraphWriter graphWriter,
+        IAnsweredClarificationLookup clarifications,
         IReadOnlyDictionary<ExtractionPromptId, ExtractionPrompt> prompts,
         ILogger<LlmExtractionJob> logger)
     {
@@ -42,6 +44,7 @@ public sealed class LlmExtractionJob
         _files = files;
         _repository = repository;
         _graphWriter = graphWriter;
+        _clarifications = clarifications;
         _prompts = prompts;
         _logger = logger;
     }
@@ -78,18 +81,69 @@ public sealed class LlmExtractionJob
             "Trimmed file {FilePath}: originalChars={OriginalChars} trimmedChars={TrimmedChars} estTokens={EstTokens}",
             filePath, raw.Length, trimmed.Length, trimResult.EstimatedTokens);
 
+        // BE-040: pre-load answered clarifications keyed by file path. This is
+        // the first of two lookups — we do a second one after service ID so
+        // clarifications attached to the service name (but no file path) flow
+        // into the remaining 5 prompts. Empty result keeps the cache key
+        // identical to the pre-BE-040 wire format.
+        var fileClarifications = await _clarifications.GetForFileAsync(
+            workspaceId, filePath, Array.Empty<string>(), ct);
+        var (fileGroundTruth, fileClfSuffix) = BuildGroundTruth(fileClarifications);
+
         var service = await RunPromptAsync<ServiceExtraction>(
-            workspaceId, ExtractionPromptId.IdentifyService, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.IdentifyService, filePath, trimmed,
+            fileGroundTruth, fileClfSuffix, ct);
+
+        // After service identification, fold the service name into the lookup
+        // so service-scoped clarifications enrich the remaining prompts. We
+        // re-merge against the file-path lookup so we don't lose answers that
+        // were only file-pathed (e.g. "what does this storage adapter do?").
+        var nodeNames = !string.IsNullOrWhiteSpace(service?.ServiceName)
+            ? new[] { service!.ServiceName! }
+            : Array.Empty<string>();
+
+        IReadOnlyList<AnsweredClarification> merged;
+        string mergedGroundTruth;
+        string mergedClfSuffix;
+        if (nodeNames.Length == 0)
+        {
+            merged = fileClarifications;
+            mergedGroundTruth = fileGroundTruth;
+            mergedClfSuffix = fileClfSuffix;
+        }
+        else
+        {
+            var serviceClarifications = await _clarifications.GetForFileAsync(
+                workspaceId, filePath, nodeNames, ct);
+            // GetForFileAsync OR's filePath and nodeNames, so the service
+            // lookup is a strict superset of the file-only lookup — replace
+            // wholesale rather than deduping by hand.
+            merged = serviceClarifications;
+            (mergedGroundTruth, mergedClfSuffix) = BuildGroundTruth(merged);
+        }
+
+        if (merged.Count > 0)
+        {
+            _logger.LogInformation(
+                "Injecting {Count} answered clarifications into LLM prompts for {FilePath}",
+                merged.Count, filePath);
+        }
+
         var endpoints = await RunPromptAsync<EndpointExtraction>(
-            workspaceId, ExtractionPromptId.ExtractHttpEndpoints, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.ExtractHttpEndpoints, filePath, trimmed,
+            mergedGroundTruth, mergedClfSuffix, ct);
         var publishes = await RunPromptAsync<EventPublisherExtraction>(
-            workspaceId, ExtractionPromptId.ExtractEventPublishers, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.ExtractEventPublishers, filePath, trimmed,
+            mergedGroundTruth, mergedClfSuffix, ct);
         var consumes = await RunPromptAsync<EventConsumerExtraction>(
-            workspaceId, ExtractionPromptId.ExtractEventConsumers, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.ExtractEventConsumers, filePath, trimmed,
+            mergedGroundTruth, mergedClfSuffix, ct);
         var storage = await RunPromptAsync<StorageOwnershipExtraction>(
-            workspaceId, ExtractionPromptId.ExtractStorageOwnership, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.ExtractStorageOwnership, filePath, trimmed,
+            mergedGroundTruth, mergedClfSuffix, ct);
         var conventions = await RunPromptAsync<ConventionExtraction>(
-            workspaceId, ExtractionPromptId.InferConventions, filePath, trimmed, ct);
+            workspaceId, ExtractionPromptId.InferConventions, filePath, trimmed,
+            mergedGroundTruth, mergedClfSuffix, ct);
 
         var aggregate = new FileExtractionRecord(
             service, endpoints, publishes, consumes, storage, conventions);
@@ -344,6 +398,8 @@ public sealed class LlmExtractionJob
         ExtractionPromptId promptId,
         string filePath,
         string fileContent,
+        string groundTruthBlock,
+        string clarificationCacheSuffix,
         CancellationToken ct)
         where T : class
     {
@@ -353,7 +409,17 @@ public sealed class LlmExtractionJob
             return null;
         }
 
-        var cacheKey = _cache.ComputeKey(fileContent, prompt.Version, ModelId);
+        // BE-040 cache strategy: when there are NO answered clarifications,
+        // clarificationCacheSuffix is "" and the effective prompt version is
+        // identical to today's `prompt.Version` — so existing cache hits keep
+        // working. When clarifications exist, the suffix is "+clf:<12hex>"
+        // (sha256 of the ground-truth block, first 12 hex chars), which forces
+        // a different cache key and avoids serving a pre-clarification answer.
+        var effectivePromptVersion = string.IsNullOrEmpty(clarificationCacheSuffix)
+            ? prompt.Version
+            : prompt.Version + clarificationCacheSuffix;
+
+        var cacheKey = _cache.ComputeKey(fileContent, effectivePromptVersion, ModelId);
 
         var cached = await _cache.GetAsync<T>(cacheKey, ct);
         if (cached is not null)
@@ -364,6 +430,14 @@ public sealed class LlmExtractionJob
         var userPrompt = prompt.UserPromptTemplate
             .Replace("{file_path}", filePath, StringComparison.Ordinal)
             .Replace("{file_content}", fileContent, StringComparison.Ordinal);
+
+        // BE-040: append ground-truth section so the LLM uses human-resolved
+        // answers as authoritative. Skipped when there are no clarifications
+        // so the on-the-wire prompt is byte-identical to the pre-BE-040 form.
+        if (!string.IsNullOrEmpty(groundTruthBlock))
+        {
+            userPrompt = userPrompt + "\n\n" + groundTruthBlock;
+        }
 
         try
         {
@@ -382,7 +456,7 @@ public sealed class LlmExtractionJob
                     cacheKey,
                     workspaceId,
                     ModelId,
-                    prompt.Version,
+                    effectivePromptVersion,
                     llmResult.Output,
                     ct);
             }
@@ -401,6 +475,37 @@ public sealed class LlmExtractionJob
                 filePath);
             return null;
         }
+    }
+
+    /// <summary>
+    /// BE-040: format answered clarifications as a Markdown "Known Ground Truth"
+    /// section and compute a stable cache-key suffix so the same clarification
+    /// set always reuses the same cache entry. When no clarifications apply,
+    /// both outputs are empty strings — the caller MUST treat empty as
+    /// "do nothing", preserving the pre-BE-040 cache key + prompt body.
+    /// </summary>
+    private static (string GroundTruthBlock, string CacheSuffix) BuildGroundTruth(
+        IReadOnlyList<AnsweredClarification> clarifications)
+    {
+        if (clarifications is null || clarifications.Count == 0)
+        {
+            return (string.Empty, string.Empty);
+        }
+
+        var sb = new StringBuilder();
+        sb.Append("## Known Ground Truth (from prior human clarifications)\n");
+        foreach (var c in clarifications)
+        {
+            sb.Append("- Q: ").Append(c.Question).Append('\n');
+            sb.Append("  A: ").Append(c.Answer).Append('\n');
+        }
+
+        var block = sb.ToString();
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(block));
+        // 12 hex chars = 48 bits — plenty to avoid collisions across the
+        // O(few) distinct clarification sets seen per file.
+        var suffix = "+clf:" + Convert.ToHexString(hash).ToLowerInvariant()[..12];
+        return (block, suffix);
     }
 
 }
