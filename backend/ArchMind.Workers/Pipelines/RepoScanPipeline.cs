@@ -146,7 +146,7 @@ public sealed class RepoScanPipeline : IRepoScanPipeline
             // 4. Mark repo + scan_run as succeeded.
             var completedAt = DateTime.UtcNow;
             repo.LastProcessedSha = currentSha;
-            repo.Status = "scanned";
+            repo.Status = "active";
             repo.UpdatedAt = completedAt;
 
             scanRun.Status = "succeeded";

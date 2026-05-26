@@ -18,7 +18,7 @@ namespace ArchMind.Infrastructure.Anthropic;
 public class AnthropicClient : IAnthropicClient
 {
     private const string MessagesEndpoint = "/v1/messages";
-    private const int MaxAttempts = 3;
+    private const int MaxAttempts = 6;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -235,7 +235,8 @@ public class AnthropicClient : IAnthropicClient
                     _logger.LogWarning(
                         "Anthropic request failed (attempt {Attempt}/{Max}) with status {Status}. Retrying. Body: {Body}",
                         attempt, MaxAttempts, (int)statusCode, Truncate(errorBody, 500));
-                    await DelayWithBackoffAsync(attempt, ct);
+                    var retryAfter = ParseRetryAfter(response.Headers);
+                    await DelayWithBackoffAsync(attempt, retryAfter, ct);
                     continue;
                 }
 
@@ -252,7 +253,7 @@ public class AnthropicClient : IAnthropicClient
                 _logger.LogWarning(ex,
                     "Anthropic request transport failure (attempt {Attempt}/{Max}). Retrying.",
                     attempt, MaxAttempts);
-                await DelayWithBackoffAsync(attempt, ct);
+                await DelayWithBackoffAsync(attempt, retryAfter: null, ct);
             }
             finally
             {
@@ -270,16 +271,39 @@ public class AnthropicClient : IAnthropicClient
         return (int)status >= 500 && (int)status < 600;
     }
 
-    private async Task DelayWithBackoffAsync(int attempt, CancellationToken ct)
+    private async Task DelayWithBackoffAsync(int attempt, TimeSpan? retryAfter, CancellationToken ct)
     {
-        // Exponential: 1s, 2s, 4s; plus 0-250ms jitter.
+        // Exponential: 1s, 2s, 4s, 8s, 16s, 32s; plus 0-500ms jitter.
         var baseMs = (int)Math.Pow(2, attempt - 1) * 1000;
         int jitterMs;
         lock (_jitter)
         {
-            jitterMs = _jitter.Next(0, 250);
+            jitterMs = _jitter.Next(0, 500);
         }
-        await Task.Delay(baseMs + jitterMs, ct);
+        // Honour the server's Retry-After if it's longer than our backoff.
+        var delayMs = Math.Max(baseMs + jitterMs, retryAfter.HasValue ? (int)retryAfter.Value.TotalMilliseconds + jitterMs : 0);
+        _logger.LogInformation("Anthropic backoff: waiting {DelayMs}ms before retry (attempt {Attempt})", delayMs, attempt);
+        await Task.Delay(delayMs, ct);
+    }
+
+    private static TimeSpan? ParseRetryAfter(HttpResponseHeaders headers)
+    {
+        // Anthropic sends retry-after-ms (milliseconds) or retry-after (seconds).
+        if (headers.TryGetValues("retry-after-ms", out var msValues))
+        {
+            var msStr = msValues.FirstOrDefault();
+            if (double.TryParse(msStr, out var ms) && ms > 0)
+                return TimeSpan.FromMilliseconds(ms);
+        }
+        if (headers.RetryAfter?.Delta is { } delta)
+            return delta;
+        if (headers.TryGetValues("retry-after", out var secValues))
+        {
+            var secStr = secValues.FirstOrDefault();
+            if (double.TryParse(secStr, out var sec) && sec > 0)
+                return TimeSpan.FromSeconds(sec);
+        }
+        return null;
     }
 
     private static async Task<string> SafeReadAsync(HttpResponseMessage response, CancellationToken ct)

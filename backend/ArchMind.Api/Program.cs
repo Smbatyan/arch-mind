@@ -97,7 +97,13 @@ try
             .UseRecommendedSerializerSettings()
             .UsePostgreSqlStorage(c => c.UseNpgsqlConnection(connectionString));
     });
-    builder.Services.AddHangfireServer();
+    builder.Services.AddHangfireServer(opts =>
+    {
+        // Limit concurrency to avoid 429 storms against the Anthropic rate limit.
+        // 2 workers = 2 files processed simultaneously, each making ~6 LLM calls
+        // = 12 concurrent requests, well within the 50 req/min org limit.
+        opts.WorkerCount = 2;
+    });
 
     // -----------------------------------------------------------------------
     // Auth: cookie-based session auth (no Identity, no JWT)

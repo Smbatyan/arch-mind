@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: apache/age:PG16_latest
+    image: apache/age:release_PG16_1.6.0
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-archmind}
       POSTGRES_USER: ${POSTGRES_USER:-archmind}
@@ -9,7 +9,7 @@ services:
     # In production DO NOT publish this port to the host — restrict access
     # to the internal `archmind` network only by removing this `ports:` block.
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres-init.sql:/docker-entrypoint-initdb.d/01-archmind-init.sql:ro
@@ -45,9 +45,9 @@ services:
       AdminSeed__Email: ${AdminSeed__Email:-admin@archmind.local}
       AdminSeed__Password: ${AdminSeed__Password:-change-me-on-first-login}
     ports:
-      - "5000:5000"
+      - "5050:5000"
     volumes:
-      - ./working:/var/lib/archmind/working
+      - ./working:/var/archmind/workspaces
       - ./logs:/var/log/archmind
     # DO-008: give SSE/MCP streams 30s to drain on shutdown instead of the
     # default 10s SIGTERM → SIGKILL window.
@@ -66,10 +66,13 @@ services:
     build:
       context: ./admin-ui
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5050}
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5000}
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5050}
+      INTERNAL_API_URL: http://backend:5000
     ports:
       - "3000:3000"
     networks:
