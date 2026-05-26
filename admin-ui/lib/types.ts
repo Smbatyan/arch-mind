@@ -88,3 +88,108 @@ export interface Clarification {
   createdAt: string;
   updatedAt: string;
 }
+
+// =============================================================================
+// Sprint 6 reporting / dashboard types
+//
+// CostUsd values come back from the API as strings to preserve precision —
+// always parse with `Number(...)` only at the display boundary.
+// =============================================================================
+
+export interface RepoKpi {
+  total: number;
+  active: number;
+  lastScanAt: string | null;
+}
+
+export interface GraphLabelCount {
+  label: string;
+  count: number;
+}
+
+export interface GraphKpi {
+  totalNodes: number;
+  totalEdges: number;
+  topLabels: GraphLabelCount[];
+}
+
+export interface ExtractionKpi {
+  totalFiles: number;
+  cachedPct: number;
+}
+
+export interface ClarificationKpi {
+  open: number;
+  answered: number;
+  dismissed: number;
+}
+
+export interface SkillsKpi {
+  total: number;
+  enabled: number;
+}
+
+export interface LlmSpendKpi {
+  totalUsd: string;
+  totalCalls: number;
+  cacheHitPct: number;
+}
+
+export interface McpActivityKpi {
+  totalCalls: number;
+  errorRatePct: number;
+  p95LatencyMs: number;
+}
+
+export interface ReportSummary {
+  repos: RepoKpi;
+  graph: GraphKpi;
+  extractions: ExtractionKpi;
+  clarifications: ClarificationKpi;
+  skills: SkillsKpi;
+  llmSpend: LlmSpendKpi;
+  mcpActivity: McpActivityKpi;
+}
+
+export type ScanStatus =
+  | "Pending"
+  | "Running"
+  | "Completed"
+  | "Failed"
+  | "Cancelled";
+
+export interface ScanSummary {
+  id: string;
+  repoId: string;
+  repoUrl: string;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  fileCount: number;
+  costUsd: string;
+  status: ScanStatus;
+}
+
+export interface ScanDetail extends ScanSummary {
+  defaultBranch: string | null;
+  commitSha: string | null;
+  nodesAdded: number;
+  edgesAdded: number;
+  cachedFiles: number;
+  errorMessage: string | null;
+  logs: string | null;
+}
+
+export interface DailyLlmSpend {
+  day: string; // ISO date (YYYY-MM-DD)
+  costUsd: string;
+  calls: number;
+  cachedCalls: number;
+}
+
+export interface DailyMcpActivity {
+  day: string; // ISO date (YYYY-MM-DD)
+  calls: number;
+  errors: number;
+  p95LatencyMs: number;
+}

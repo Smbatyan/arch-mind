@@ -2,19 +2,26 @@ services:
   postgres:
     image: apache/age:PG16_latest
     environment:
-      POSTGRES_DB: archmind
-      POSTGRES_USER: archmind
+      POSTGRES_DB: ${POSTGRES_DB:-archmind}
+      POSTGRES_USER: ${POSTGRES_USER:-archmind}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archmind_dev}
+    # DO-009: 5432 is exposed for local dev convenience (psql, smoke tests).
+    # In production DO NOT publish this port to the host — restrict access
+    # to the internal `archmind` network only by removing this `ports:` block.
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./infra/postgres-init.sql:/docker-entrypoint-initdb.d/01-archmind-init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U archmind"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    networks:
+      - archmind
+    restart: unless-stopped
 
   backend:
     build:
@@ -24,14 +31,23 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Development}
       ASPNETCORE_URLS: http://+:5000
-      ConnectionStrings__Default: Host=postgres;Database=archmind;Username=archmind;Password=${POSTGRES_PASSWORD:-archmind_dev}
-      Anthropic__ApiKey: ${ANTHROPIC_API_KEY}
+      ConnectionStrings__Default: ${ConnectionStrings__Default:-Host=postgres;Port=5432;Database=archmind;Username=archmind;Password=${POSTGRES_PASSWORD:-archmind_dev}}
+      Anthropic__ApiKey: ${Anthropic__ApiKey:-${ANTHROPIC_API_KEY}}
+      Auth__RequireHttps: ${Auth__RequireHttps:-false}
+      Cors__AllowedOrigins__0: ${Cors__AllowedOrigins__0:-http://localhost:3000}
+      Logging__FilePath: ${Logging__FilePath:-/var/log/archmind}
+      GitHub__AppId: ${GitHub__AppId:-}
+      GitHub__InstallationId: ${GitHub__InstallationId:-}
+      GitHub__PrivateKeyPath: ${GitHub__PrivateKeyPath:-/etc/archmind/github-app.pem}
+      Polling__IntervalMinutes: ${Polling__IntervalMinutes:-15}
+      AdminSeed__Email: ${AdminSeed__Email:-admin@archmind.local}
+      AdminSeed__Password: ${AdminSeed__Password:-change-me-on-first-login}
     ports:
       - "5000:5000"
     volumes:
-      - working_data:/var/archmind/workspaces
+      - ./working:/var/lib/archmind/working
       - ./logs:/var/log/archmind
     # DO-008: give SSE/MCP streams 30s to drain on shutdown instead of the
     # default 10s SIGTERM → SIGKILL window.
@@ -42,6 +58,9 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    networks:
+      - archmind
+    restart: unless-stopped
 
   admin-ui:
     build:
@@ -50,10 +69,16 @@ services:
     depends_on:
       - backend
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:5000}
     ports:
       - "3000:3000"
+    networks:
+      - archmind
+    restart: unless-stopped
+
+networks:
+  archmind:
+    driver: bridge
 
 volumes:
   postgres_data:
-  working_data:

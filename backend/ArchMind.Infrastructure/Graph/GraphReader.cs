@@ -849,6 +849,32 @@ internal sealed class GraphReader : IGraphReader
         };
     }
 
+    // BE-046: cheap availability probe. Returns true if AGE is loaded and the
+    // archmind_graph reachable. Swallows ALL exceptions and returns false —
+    // callers (smoke endpoint) want a bool, not an exception.
+    public async Task<bool> IsAvailableAsync(CancellationToken ct = default)
+    {
+        const string cypher = """
+            MATCH (n)
+            RETURN count(n) AS c
+            LIMIT 1
+        """;
+
+        try
+        {
+            await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+            // We don't care about the count value — just that the query
+            // returns without throwing. Use QueryColumnAsync to round-trip
+            // through the same agtype path the real queries use.
+            _ = await QueryColumnAsync(conn, cypher, new { }, "c", ct).ConfigureAwait(false);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     // ── Invariants ────────────────────────────────────────────────────────
 
     /// <summary>

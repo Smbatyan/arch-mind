@@ -69,6 +69,11 @@ public static class DependencyInjection
         // bootstrap runs per-connection there).
         services.AddScoped<IGraphReader, GraphReader>();
 
+        // BE-044: graph schema validator. Enforces declared vertex/edge
+        // labels and required-properties at the write boundary, and
+        // surfaces drift between GraphSchema and the live AGE catalog.
+        services.AddScoped<IGraphSchemaValidator, GraphSchemaValidator>();
+
         // BE-028: workspace API key issuance / validation / revocation.
         services.AddScoped<IApiKeyService, ApiKeyService>();
 

@@ -210,7 +210,7 @@ function EmptyState({ tab }: { tab: TabValue }) {
     open: "No open clarifications. Inbox zero.",
     answered: "No answered clarifications yet.",
     dismissed: "No dismissed clarifications.",
-    all: "No clarifications in this workspace.",
+    all: "No clarifications yet. Run a scan to surface ambiguous extractions.",
   };
   return (
     <div className="flex justify-center py-12">

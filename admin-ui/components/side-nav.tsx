@@ -2,13 +2,23 @@
 
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { KeyIcon, MessageCircleQuestion, SparklesIcon } from "lucide-react";
+import {
+  KeyIcon,
+  LayoutDashboardIcon,
+  MessageCircleQuestion,
+  SparklesIcon,
+} from "lucide-react";
 
 type NavItem = { label: string; href: string; icon?: React.ReactNode };
 
 function buildItems(slug: string | null): NavItem[] {
   // TODO(FE-006+): replace `/workspaces` placeholders with `/workspaces/[slug]/...`
   return [
+    {
+      label: "Dashboard",
+      href: slug ? `/workspaces/${slug}/dashboard` : "/workspaces",
+      icon: <LayoutDashboardIcon className="size-3.5" />,
+    },
     { label: "Repos", href: "/workspaces" },
     {
       label: "Skills",

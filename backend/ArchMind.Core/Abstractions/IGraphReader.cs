@@ -83,4 +83,12 @@ public interface IGraphReader
         IEnumerable<string> tokens,
         int limit,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// BE-046 (smoke probe): runs a cheap no-op Cypher query against the AGE
+    /// graph to verify the extension is loaded and the graph reachable. Returns
+    /// <c>true</c> on success, <c>false</c> on any exception. Does NOT throw —
+    /// suitable for health-probe call sites that surface a structured result.
+    /// </summary>
+    Task<bool> IsAvailableAsync(CancellationToken ct = default);
 }

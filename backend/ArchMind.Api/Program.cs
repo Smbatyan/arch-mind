@@ -2,6 +2,7 @@ using ArchMind.Api.Auth;
 using ArchMind.Api.Endpoints;
 using ArchMind.Api.Mcp;
 using ArchMind.Api.Middleware;
+using ArchMind.Api.Smoke;
 using ArchMind.Core.Abstractions;
 using ArchMind.Infrastructure;
 using ArchMind.Infrastructure.Auth;
@@ -188,6 +189,22 @@ try
     var app = builder.Build();
 
     // -----------------------------------------------------------------------
+    // BE-046: --smoke CLI mode. Run the smoke probe against the resolved
+    // service provider, print a table to stdout, and exit. Used for CI and
+    // for docker healthcheck escalation. We deliberately skip MigrateAsync
+    // here so a broken DB still produces a useful report instead of crashing
+    // before the probe can run.
+    // -----------------------------------------------------------------------
+    if (args.Contains("--smoke"))
+    {
+        using var smokeCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var exitCode = await SmokeRunner.RunOnceAsync(app.Services, smokeCts.Token);
+        Log.CloseAndFlush();
+        Environment.Exit(exitCode);
+        return;
+    }
+
+    // -----------------------------------------------------------------------
     // Apply migrations in non-production. Log any failure but don't crash.
     // -----------------------------------------------------------------------
     if (!app.Environment.IsProduction())
@@ -211,6 +228,44 @@ try
             Log.Error(ex, "Failed to apply database migrations on startup.");
         }
     }
+
+    // -----------------------------------------------------------------------
+    // BE-044: fire-and-forget graph schema drift check. Compares declared
+    // GraphSchema against the AGE catalog (ag_label rows) and emits a
+    // warning if anything is missing or extra. 10s timeout so a stuck
+    // Postgres can't strand startup. Wrapped in its own scope because
+    // IGraphSchemaValidator is registered as scoped.
+    // -----------------------------------------------------------------------
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            using var driftCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            using var scope = app.Services.CreateScope();
+            var validator = scope.ServiceProvider.GetRequiredService<IGraphSchemaValidator>();
+            var report = await validator.CheckLiveSchemaAsync(driftCts.Token);
+
+            if (report.HasDrift)
+            {
+                Log.Warning(
+                    "Graph schema drift detected. Missing node labels: [{MissingNodes}]; " +
+                    "extra node labels: [{ExtraNodes}]; missing edge labels: [{MissingEdges}]; " +
+                    "extra edge labels: [{ExtraEdges}].",
+                    string.Join(", ", report.MissingNodeLabels),
+                    string.Join(", ", report.ExtraNodeLabels),
+                    string.Join(", ", report.MissingEdgeLabels),
+                    string.Join(", ", report.ExtraEdgeLabels));
+            }
+            else
+            {
+                Log.Information("Graph schema drift check OK — declared schema matches AGE catalog.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Graph schema drift check failed; continuing without it.");
+        }
+    });
 
     // -----------------------------------------------------------------------
     // HTTP pipeline
@@ -263,6 +318,8 @@ try
     app.MapSkillEndpoints();
     app.MapClarificationEndpoints();
     app.MapMcpEndpoints();
+    app.MapReportEndpoints();
+    app.MapSmokeEndpoints();
 
     // -----------------------------------------------------------------------
     // Enqueue a one-time job to prove Hangfire is operating.

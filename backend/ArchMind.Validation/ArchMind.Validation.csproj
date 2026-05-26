@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ArchMind.Validation</RootNamespace>
+    <AssemblyName>ArchMind.Validation</AssemblyName>
+  </PropertyGroup>
+
+  <!--
+    BE-045: end-to-end validation harness.
+
+    Deliberately standalone: depends only on System.Net.Http.Json (in the
+    framework reference) so it can be built and run without dragging in the
+    rest of the solution. Exercises the live HTTP API; not a unit-test project.
+  -->
+
+</Project>

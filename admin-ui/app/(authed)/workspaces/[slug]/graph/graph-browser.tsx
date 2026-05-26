@@ -1,11 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import * as React from "react";
 
 import { api } from "@/lib/api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NodeClarificationsPanel } from "@/components/node-clarifications-panel";
 
@@ -88,6 +96,32 @@ export function GraphBrowser({
     },
     []
   );
+
+  const graphIsEmpty =
+    initialLabels.vertices.length === 0 && initialLabels.edges.length === 0;
+
+  if (graphIsEmpty) {
+    return (
+      <div className="flex w-full justify-center px-4 py-12 md:px-6">
+        <Card className="w-full max-w-md">
+          <CardHeader>
+            <CardTitle>Graph is empty</CardTitle>
+            <CardDescription>
+              Run a scan to populate the graph.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Link
+              href={`/workspaces/${slug}/dashboard`}
+              className="inline-flex h-8 items-center justify-center rounded-lg border border-border bg-background px-2.5 text-sm font-medium transition-colors hover:bg-muted hover:text-foreground"
+            >
+              Go to dashboard
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="grid min-h-[600px] w-full grid-cols-1 gap-4 px-4 md:px-6 lg:grid-cols-[18rem_22rem_minmax(0,1fr)]">

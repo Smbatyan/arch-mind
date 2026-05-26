@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using ArchMind.Core.Abstractions;
 using ArchMind.Core.Entities;
+using ArchMind.Core.Models.Graph;
 using ArchMind.Infrastructure.Data;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -50,6 +51,9 @@ public static class GraphEndpoints
         group.MapGet("/labels", GetLabelsAsync);
         group.MapGet("/nodes", ListNodesByLabelAsync);
         group.MapGet("/nodes/{label}/{id:guid}", GetNodeAsync);
+
+        // BE-044: declared schema + drift report + live counts.
+        group.MapGet("/schema-report", GetSchemaReportAsync);
 
         return app;
     }
@@ -237,4 +241,72 @@ public static class GraphEndpoints
 
     private static IResult NotFound() =>
         Results.Json(new { error = "not found" }, statusCode: StatusCodes.Status404NotFound);
+
+    // ---------------------------------------------------------------------
+    // BE-044: schema-report endpoint
+    // ---------------------------------------------------------------------
+    public sealed record NodeLabelDto(string Label, string[] Required, string[] Optional);
+
+    public sealed record EdgeLabelDto(string Label, string[] FromLabels, string[] ToLabels);
+
+    public sealed record DeclaredSchemaDto(
+        IReadOnlyList<NodeLabelDto> Nodes,
+        IReadOnlyList<EdgeLabelDto> Edges);
+
+    public sealed record SchemaDriftDto(
+        IReadOnlyList<string> MissingNodeLabels,
+        IReadOnlyList<string> ExtraNodeLabels,
+        IReadOnlyList<string> MissingEdgeLabels,
+        IReadOnlyList<string> ExtraEdgeLabels,
+        bool HasDrift);
+
+    public sealed record GraphOverviewDto(
+        IReadOnlyDictionary<string, int> NodeCounts,
+        IReadOnlyDictionary<string, int> EdgeCounts);
+
+    public sealed record SchemaReportResponse(
+        DeclaredSchemaDto Declared,
+        SchemaDriftDto Drift,
+        GraphOverviewDto Counts);
+
+    private static async Task<IResult> GetSchemaReportAsync(
+        string slug,
+        ArchMindDbContext db,
+        IGraphReader graphReader,
+        IGraphSchemaValidator validator,
+        HttpContext httpContext,
+        CancellationToken ct)
+    {
+        if (!httpContext.TryGetCurrentUserId(out var userId))
+        {
+            return Unauthenticated();
+        }
+
+        var workspace = await ResolveMemberWorkspaceAsync(db, slug, userId, ct);
+        if (workspace is null)
+        {
+            return NotFound();
+        }
+
+        var declared = new DeclaredSchemaDto(
+            GraphSchema.NodeLabels
+                .Select(n => new NodeLabelDto(n.Label, n.Required, n.Optional))
+                .ToList(),
+            GraphSchema.EdgeLabels
+                .Select(e => new EdgeLabelDto(e.Label, e.FromLabels, e.ToLabels))
+                .ToList());
+
+        var drift = await validator.CheckLiveSchemaAsync(ct);
+        var driftDto = new SchemaDriftDto(
+            drift.MissingNodeLabels,
+            drift.ExtraNodeLabels,
+            drift.MissingEdgeLabels,
+            drift.ExtraEdgeLabels,
+            drift.HasDrift);
+
+        var overview = await graphReader.GetOverviewAsync(workspace.Id, ct);
+        var countsDto = new GraphOverviewDto(overview.NodeCounts, overview.EdgeCounts);
+
+        return Results.Ok(new SchemaReportResponse(declared, driftDto, countsDto));
+    }
 }

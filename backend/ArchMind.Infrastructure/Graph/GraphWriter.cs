@@ -58,16 +58,25 @@ internal sealed class GraphWriter : IGraphWriter
         new("^[a-z_][a-z0-9_]*$", RegexOptions.Compiled);
 
     private readonly IDbConnectionFactory _connectionFactory;
+    private readonly IGraphSchemaValidator _schemaValidator;
     private readonly ILogger<GraphWriter> _logger;
 
-    public GraphWriter(IDbConnectionFactory connectionFactory, ILogger<GraphWriter> logger)
+    public GraphWriter(
+        IDbConnectionFactory connectionFactory,
+        IGraphSchemaValidator schemaValidator,
+        ILogger<GraphWriter> logger)
     {
         _connectionFactory = connectionFactory;
+        _schemaValidator = schemaValidator;
         _logger = logger;
     }
 
     public async Task<Guid> UpsertNodeAsync(GraphNodeSpec spec, CancellationToken ct = default)
     {
+        if (!TryValidateNode(spec))
+        {
+            return spec.Id;
+        }
         await using var conn = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
         await UpsertNodeCoreAsync(conn, transaction: null, spec, ct).ConfigureAwait(false);
         return spec.Id;
@@ -75,6 +84,10 @@ internal sealed class GraphWriter : IGraphWriter
 
     public async Task UpsertEdgeAsync(GraphEdgeSpec spec, CancellationToken ct = default)
     {
+        if (!TryValidateEdge(spec))
+        {
+            return;
+        }
         await using var conn = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
         await UpsertEdgeCoreAsync(conn, transaction: null, spec, ct).ConfigureAwait(false);
     }
@@ -260,6 +273,61 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
 
     // ---- helpers ----
 
+    /// <summary>
+    /// Runs the schema validator against a node upsert. Returns true if
+    /// the write should proceed; logs a warning and returns false if any
+    /// hard validation rule fires. Unknown-property warnings are logged
+    /// at debug level and do not block the write.
+    /// </summary>
+    /// <remarks>
+    /// BE-044: log-and-skip policy. The extraction pipeline should not
+    /// crash on a single bad row, but it also should not silently let
+    /// invalid shapes into the graph.
+    /// </remarks>
+    private bool TryValidateNode(GraphNodeSpec spec)
+    {
+        var result = _schemaValidator.ValidateNode(spec.Label, spec.Properties);
+        EmitWarnings(result, $"node label='{spec.Label}' id={spec.Id}");
+        if (!result.IsValid)
+        {
+            var hardErrors = result.Errors
+                .Where(e => !e.StartsWith("[warn]", StringComparison.Ordinal));
+            _logger.LogWarning(
+                "Skipping graph node upsert: label='{Label}' id={Id} workspace={Workspace} errors={Errors}",
+                spec.Label, spec.Id, spec.WorkspaceId, string.Join("; ", hardErrors));
+            return false;
+        }
+        return true;
+    }
+
+    private bool TryValidateEdge(GraphEdgeSpec spec)
+    {
+        // The from/to vertex labels are not carried on GraphEdgeSpec —
+        // the edge is matched by id + workspace_id. Pass empty strings
+        // so the validator skips label-pair enforcement (treated as
+        // warning) while still rejecting unknown edge labels.
+        var result = _schemaValidator.ValidateEdge(spec.Label, fromLabel: string.Empty, toLabel: string.Empty);
+        EmitWarnings(result, $"edge label='{spec.Label}' {spec.SourceId}->{spec.TargetId}");
+        if (!result.IsValid)
+        {
+            var hardErrors = result.Errors
+                .Where(e => !e.StartsWith("[warn]", StringComparison.Ordinal));
+            _logger.LogWarning(
+                "Skipping graph edge upsert: label='{Label}' source={Source} target={Target} workspace={Workspace} errors={Errors}",
+                spec.Label, spec.SourceId, spec.TargetId, spec.WorkspaceId, string.Join("; ", hardErrors));
+            return false;
+        }
+        return true;
+    }
+
+    private void EmitWarnings(SchemaValidationResult result, string context)
+    {
+        foreach (var warn in result.Errors.Where(e => e.StartsWith("[warn]", StringComparison.Ordinal)))
+        {
+            _logger.LogDebug("Graph schema warning ({Context}): {Warning}", context, warn);
+        }
+    }
+
     private static void ValidateVertexLabel(string label)
     {
         if (string.IsNullOrWhiteSpace(label))
@@ -376,12 +444,20 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
 
         public async Task UpsertNodeAsync(GraphNodeSpec spec, CancellationToken ct = default)
         {
+            if (!_owner.TryValidateNode(spec))
+            {
+                return;
+            }
             await _owner.UpsertNodeCoreAsync(_conn, _tx, spec, ct).ConfigureAwait(false);
             OperationCount++;
         }
 
         public async Task UpsertEdgeAsync(GraphEdgeSpec spec, CancellationToken ct = default)
         {
+            if (!_owner.TryValidateEdge(spec))
+            {
+                return;
+            }
             await _owner.UpsertEdgeCoreAsync(_conn, _tx, spec, ct).ConfigureAwait(false);
             OperationCount++;
         }

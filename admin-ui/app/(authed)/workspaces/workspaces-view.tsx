@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { OnboardingChecklist } from "@/components/onboarding-checklist";
 
 export type Workspace = {
   id: string;
@@ -140,17 +141,13 @@ function WorkspaceCard({
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="flex justify-center py-12">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>No workspaces yet</CardTitle>
-          <CardDescription>
-            Create one to get started.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="flex justify-center pb-4">
-          <Button onClick={onCreate}>Create Workspace</Button>
-        </CardContent>
-      </Card>
+      <div className="w-full max-w-md">
+        <OnboardingChecklist
+          primaryActionLabel="Create workspace"
+          onPrimaryAction={onCreate}
+          showDismiss={false}
+        />
+      </div>
     </div>
   );
 }
