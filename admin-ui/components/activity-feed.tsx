@@ -40,8 +40,9 @@ function formatRelative(value: string): string {
   return `${Math.floor(month / 12)}y ago`;
 }
 
-function repoName(url: string): string {
-  return url.replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
+function repoName(url: string | null | undefined): string {
+  if (!url) return "—";
+  return url.replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "") || url;
 }
 
 function formatUsd(value: string): string {
@@ -59,13 +60,13 @@ type FeedEvent =
       kind: "scan-started";
       id: string;
       at: string;
-      repoUrl: string;
+      repoUrl: string | null;
     }
   | {
       kind: "scan-finished";
       id: string;
       at: string;
-      repoUrl: string;
+      repoUrl: string | null;
       fileCount: number;
       costUsd: string;
       success: boolean;
@@ -78,20 +79,41 @@ type FeedEvent =
       topic: string;
     };
 
+// Normalize raw API scan shape → ScanSummary (API uses snake_case / different keys).
+function normalizeScan(raw: Record<string, unknown>): ScanSummary {
+  const finishedAt =
+    (raw.finishedAt as string | null) ??
+    (raw.completedAt as string | null) ??
+    null;
+  return {
+    id: String(raw.id ?? ""),
+    repoId: String(raw.repoId ?? ""),
+    repoUrl: (raw.repoUrl as string | null) ?? null,
+    startedAt: String(raw.startedAt ?? ""),
+    finishedAt,
+    durationMs: null,
+    fileCount: Number(raw.fileCount ?? raw.filesScanned ?? 0),
+    costUsd: String(raw.costUsd ?? raw.totalCostUsd ?? "0"),
+    status: (raw.status as ScanSummary["status"]) ?? "Running",
+  };
+}
+
 function buildFeed(
-  scans: ScanSummary[],
+  scans: Record<string, unknown>[],
   clarifications: Clarification[]
 ): FeedEvent[] {
   const events: FeedEvent[] = [];
 
-  for (const scan of scans) {
+  for (const rawScan of scans) {
+    const scan = normalizeScan(rawScan);
+    const doneStatuses = ["succeeded", "Completed", "failed", "Failed", "cancelled", "Cancelled"];
     events.push({
       kind: "scan-started",
       id: `${scan.id}-start`,
       at: scan.startedAt,
       repoUrl: scan.repoUrl,
     });
-    if (scan.finishedAt) {
+    if (scan.finishedAt && doneStatuses.includes(scan.status)) {
       events.push({
         kind: "scan-finished",
         id: `${scan.id}-finish`,
@@ -99,10 +121,7 @@ function buildFeed(
         repoUrl: scan.repoUrl,
         fileCount: scan.fileCount,
         costUsd: scan.costUsd,
-        success:
-          scan.status === "Completed" ||
-          scan.status === "Pending" ||
-          scan.status === "Running",
+        success: scan.status === "succeeded" || scan.status === "Completed",
       });
     }
   }
@@ -216,9 +235,9 @@ export function ActivityFeed({ slug }: { slug: string }) {
     async function load() {
       try {
         const [scans, clarifications] = await Promise.all([
-          api<ScanSummary[]>(
+          api<Record<string, unknown>[]>(
             `/api/workspaces/${slug}/report/scans?limit=5`
-          ).catch(() => [] as ScanSummary[]),
+          ).catch(() => [] as Record<string, unknown>[]),
           api<Clarification[]>(
             `/api/workspaces/${slug}/clarifications?status=all&limit=5`
           ).catch(() => [] as Clarification[]),

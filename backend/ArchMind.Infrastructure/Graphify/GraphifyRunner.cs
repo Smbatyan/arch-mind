@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using ArchMind.Core.Abstractions;
 using ArchMind.Core.Exceptions;
+using ArchMind.Infrastructure.Anthropic;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -17,11 +18,16 @@ namespace ArchMind.Infrastructure.Graphify;
 public sealed class GraphifyRunner : IGraphifyRunner
 {
     private readonly GraphifyOptions _options;
+    private readonly AnthropicOptions _anthropic;
     private readonly ILogger<GraphifyRunner> _logger;
 
-    public GraphifyRunner(IOptions<GraphifyOptions> options, ILogger<GraphifyRunner> logger)
+    public GraphifyRunner(
+        IOptions<GraphifyOptions> options,
+        IOptions<AnthropicOptions> anthropicOptions,
+        ILogger<GraphifyRunner> logger)
     {
         _options = options.Value;
+        _anthropic = anthropicOptions.Value;
         _logger = logger;
     }
 
@@ -45,28 +51,19 @@ public sealed class GraphifyRunner : IGraphifyRunner
             CreateNoWindow = true,
         };
 
-        // graphify extract <repoPath> --no-viz --no-cluster
-        // The --no-viz / --no-cluster flags disable Graphify's internal HTML visualization
-        // and clustering (which is where Graphify's own LLM enrichment happens).
-        // TODO(graphify-cli): Verify these flags match Graphify's actual CLI surface.
-        //   If `--no-cluster` is not recognized, the correct disabling flag may be
-        //   `--no-llm`, `--no-enrich`, or similar. Confirm against `graphify --help`
-        //   inside the container and update accordingly.
+        // graphify extract <repoPath> --backend claude
+        // `extract` does headless AST + semantic LLM extraction. It requires an LLM
+        // key — there is no skip-LLM flag for this command. We pin --backend claude
+        // since that is always configured. --no-viz / --no-cluster are not valid for
+        // `extract` (they belong to cluster-only / update subcommands).
         psi.ArgumentList.Add("extract");
         psi.ArgumentList.Add(repoPath);
-        psi.ArgumentList.Add("--no-viz");
-        psi.ArgumentList.Add("--no-cluster");
+        psi.ArgumentList.Add("--backend");
+        psi.ArgumentList.Add("claude");
 
-        // Defense-in-depth: even with CLI flags above, neutralize any LLM API keys
-        // and set hint env vars Graphify may honor. Empty strings rather than removal
-        // because some libs treat "missing" differently from "empty".
-        // TODO(graphify-env): Verify these env vars / flags match Graphify's actual
-        // interface. If Graphify still tries to call an LLM, update flags/env per its docs.
-        psi.EnvironmentVariables["OPENAI_API_KEY"] = string.Empty;
-        psi.EnvironmentVariables["ANTHROPIC_API_KEY"] = string.Empty;
-        psi.EnvironmentVariables["GRAPHIFY_NO_LLM"] = "1";
-        psi.EnvironmentVariables["GRAPHIFY_DISABLE_LLM"] = "1";
-        psi.EnvironmentVariables["NO_LLM"] = "1";
+        // Pass the Anthropic key so graphify can reach the LLM.
+        if (!string.IsNullOrWhiteSpace(_anthropic.ApiKey))
+            psi.EnvironmentVariables["ANTHROPIC_API_KEY"] = _anthropic.ApiKey;
 
         Process? process;
         try
@@ -212,7 +209,13 @@ public sealed class GraphifyRunner : IGraphifyRunner
             }
 
             // Some Graphify versions may wrap content under a "graph" key.
-            var content = TryGetProp(root, "graph") is JsonElement g && g.ValueKind == JsonValueKind.Object
+            // Only use the nested object if it actually contains nodes — the real
+            // graphify output uses "graph": {} (empty metadata dict) at root level
+            // while nodes/links live directly on root.
+            var graphEl = TryGetProp(root, "graph");
+            var content = (graphEl is JsonElement g
+                && g.ValueKind == JsonValueKind.Object
+                && g.TryGetProperty("nodes", out _))
                 ? g
                 : root;
 

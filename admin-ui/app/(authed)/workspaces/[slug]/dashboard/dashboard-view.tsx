@@ -105,7 +105,8 @@ function formatDayShort(iso: string): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-function repoName(url: string): string {
+function repoName(url: string | null | undefined): string {
+  if (!url) return "—";
   // strip protocol/host, drop trailing .git
   const cleaned = url.replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
   return cleaned || url;
@@ -398,13 +399,16 @@ function EmptyChart({ label }: { label: string }) {
 // ---------------------------------------------------------------------------
 
 function statusBadgeVariant(
-  status: ScanSummary["status"]
+  status: ScanSummary["status"] | string
 ): "default" | "secondary" | "destructive" | "outline" {
   switch (status) {
+    case "succeeded":
     case "Completed":
       return "default";
+    case "failed":
     case "Failed":
       return "destructive";
+    case "cancelled":
     case "Cancelled":
       return "outline";
     default:
@@ -433,9 +437,47 @@ function RecentScansTable({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    api<ScanDetail>(`/api/workspaces/${slug}/report/scans/${openScanId}`)
-      .then((d) => {
-        if (!cancelled) setDetail(d);
+    api<Record<string, unknown>>(`/api/workspaces/${slug}/report/scans/${openScanId}`)
+      .then((raw) => {
+        if (!cancelled) {
+          // Normalize backend field names → frontend ScanDetail shape
+          const finishedAt =
+            (raw.finishedAt as string | null) ??
+            (raw.completedAt as string | null) ??
+            null;
+          const startedAt = String(raw.startedAt ?? "");
+          const durationMs =
+            (raw.durationMs as number | null) ??
+            (startedAt && finishedAt
+              ? Math.max(
+                  0,
+                  new Date(finishedAt).getTime() -
+                    new Date(startedAt).getTime()
+                )
+              : null);
+          const normalized: ScanDetail = {
+            id: String(raw.id ?? openScanId),
+            repoId: String(raw.repoId ?? ""),
+            repoUrl: (raw.repoUrl as string | null) ?? null,
+            startedAt,
+            finishedAt,
+            durationMs,
+            fileCount: Number(raw.fileCount ?? raw.filesScanned ?? 0),
+            costUsd: String(raw.costUsd ?? raw.totalCostUsd ?? "0"),
+            status: (raw.status as ScanDetail["status"]) ?? "Running",
+            defaultBranch: (raw.defaultBranch as string | null) ?? null,
+            commitSha:
+              (raw.commitSha as string | null) ??
+              (raw.toSha as string | null) ??
+              null,
+            nodesAdded: Number(raw.nodesAdded ?? raw.graphifyNodes ?? 0),
+            edgesAdded: Number(raw.edgesAdded ?? raw.graphifyEdges ?? 0),
+            cachedFiles: Number(raw.cachedFiles ?? raw.filesEnqueued ?? 0),
+            errorMessage: (raw.errorMessage as string | null) ?? null,
+            logs: (raw.logs as string | null) ?? null,
+          };
+          setDetail(normalized);
+        }
       })
       .catch((e: unknown) => {
         if (!cancelled) {

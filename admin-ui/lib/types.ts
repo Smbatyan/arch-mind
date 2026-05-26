@@ -156,12 +156,16 @@ export type ScanStatus =
   | "Running"
   | "Completed"
   | "Failed"
-  | "Cancelled";
+  | "Cancelled"
+  | "succeeded"
+  | "running"
+  | "failed"
+  | "cancelled";
 
 export interface ScanSummary {
   id: string;
   repoId: string;
-  repoUrl: string;
+  repoUrl: string | null;
   startedAt: string;
   finishedAt: string | null;
   durationMs: number | null;
