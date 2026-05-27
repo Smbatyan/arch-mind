@@ -184,7 +184,7 @@ internal sealed class GraphSchemaValidator : IGraphSchemaValidator
         const string sql = @"
 SELECT name
 FROM ag_catalog.ag_label
-WHERE graph = (SELECT oid FROM ag_catalog.ag_graph WHERE name = @graph)
+WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = @graph)
   AND kind = @kind
   AND name NOT LIKE '\_ag\_label\_%' ESCAPE '\';";
 
