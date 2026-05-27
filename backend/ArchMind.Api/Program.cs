@@ -351,6 +351,53 @@ try
         }
     }).AllowAnonymous();
 
+    // BE-044: tiny LLM reachability probe. Issues a 1-token Haiku completion so
+    // the response is end-to-end (auth + network + model) but bills only a few
+    // tokens per check. Uptime monitors should poll this no more than once a
+    // minute; for higher cadence prefer /health which is free.
+    app.MapGet("/health/llm", async (IAnthropicClient anthropic, CancellationToken httpCt) =>
+    {
+        // Cap server-side at 5s so a slow Anthropic call doesn't hold an HTTP
+        // worker indefinitely. The probe itself completes in well under 1s
+        // when healthy.
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(httpCt);
+        cts.CancelAfter(TimeSpan.FromSeconds(5));
+
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var result = await anthropic.CompleteTextAsync(
+                systemPrompt: "Reply with exactly: ok",
+                userPrompt: "ping",
+                model: AnthropicModel.Haiku,
+                maxTokens: 8,
+                ct: cts.Token);
+            sw.Stop();
+
+            return Results.Ok(new
+            {
+                status = "ok",
+                model = result.ModelId,
+                input_tokens = result.InputTokens,
+                output_tokens = result.OutputTokens,
+                latency_ms = (long)sw.ElapsedMilliseconds,
+            });
+        }
+        catch (OperationCanceledException)
+        {
+            return Results.Json(
+                new { status = "llm timeout" },
+                statusCode: StatusCodes.Status504GatewayTimeout);
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "LLM health probe failed.");
+            return Results.Json(
+                new { status = "llm unreachable", reason = ex.Message },
+                statusCode: StatusCodes.Status503ServiceUnavailable);
+        }
+    }).AllowAnonymous();
+
     app.MapAuthEndpoints();
     app.MapWorkspaceEndpoints();
     app.MapRepoEndpoints();

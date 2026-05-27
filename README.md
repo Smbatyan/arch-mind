@@ -63,34 +63,30 @@ key.
    `http://your-host:5000/mcp/{slug}` with header
    `Authorization: Bearer <key>`.
 
-Example for **Claude Code** (`~/.claude/mcp-servers.json` or equivalent):
+Full setup guides:
+
+- **Claude Code:** `docs/connecting-claude-code.md` — `claude mcp add`,
+  `.claude.json` shape, verification, troubleshooting.
+- **Cursor:** `docs/connecting-cursor.md` — `~/.cursor/mcp.json`,
+  per-project overrides, troubleshooting.
+
+Quick reference — the wire-level shape both clients land on:
 
 ```json
 {
   "mcpServers": {
     "archmind-acme": {
-      "transport": {
-        "type": "sse",
-        "url": "http://your-host:5000/mcp/acme",
-        "headers": { "Authorization": "Bearer ak_live_..." }
-      }
-    }
-  }
-}
-```
-
-Example for **Cursor** (`.cursor/mcp.json` in your project):
-
-```json
-{
-  "mcpServers": {
-    "archmind-acme": {
+      "type": "http",
       "url": "http://your-host:5000/mcp/acme",
       "headers": { "Authorization": "Bearer ak_live_..." }
     }
   }
 }
 ```
+
+ArchMind speaks the **Streamable HTTP** MCP transport — not stdio and
+not the legacy SSE-only transport. If your client config uses
+`"type": "sse"` or `command/args`, the handshake will fail.
 
 ## Production deployment
 
@@ -244,4 +240,5 @@ MVP under active development. Not for production use.
 
 Sprint 1 currently delivers the admin UI shell, the Hangfire dashboard, and an empty workspace surface — most ingestion and query features are still being built.
 
-See `docs/known-limitations.md` (placeholder — to be added) for a running list of caveats.
+See `docs/known-limitations.md` for the full list of caveats and
+deferred pre-release hardening items.
