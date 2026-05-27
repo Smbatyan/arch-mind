@@ -378,6 +378,16 @@ internal static class Program
                 // service so we expect at least a Service node but don't make
                 // Endpoint hard-required (depends on whether HTTP routes were
                 // detectable from the LLM extraction).
+                int eventCount = 0;
+                if (doc.RootElement.TryGetProperty("vertices", out var vs2))
+                {
+                    foreach (var v in vs2.EnumerateArray())
+                    {
+                        if (v.GetProperty("label").GetString() == "Event")
+                            eventCount = v.GetProperty("count").GetInt32();
+                    }
+                }
+
                 if (totalVertices == 0)
                 {
                     ctx.Fail("GET /graph/labels", "graph is empty (no vertices)");
@@ -387,9 +397,24 @@ internal static class Program
                     ctx.Fail("GET /graph/labels",
                         $"no Service vertex (total={totalVertices})");
                 }
+                else if (serviceCount < ctx.Options.MinServices)
+                {
+                    ctx.Fail("GET /graph/labels",
+                        $"services={serviceCount} < required {ctx.Options.MinServices} (total={totalVertices})");
+                }
+                else if (eventCount < ctx.Options.MinEvents)
+                {
+                    ctx.Fail("GET /graph/labels",
+                        $"events={eventCount} < required {ctx.Options.MinEvents}");
+                }
+                else if (endpointCount < ctx.Options.MinEndpoints)
+                {
+                    ctx.Fail("GET /graph/labels",
+                        $"endpoints={endpointCount} < required {ctx.Options.MinEndpoints}");
+                }
                 else
                 {
-                    ctx.Pass($"GET /graph/labels (services={serviceCount}, endpoints={endpointCount}, total={totalVertices})");
+                    ctx.Pass($"GET /graph/labels (services={serviceCount}, events={eventCount}, endpoints={endpointCount}, total={totalVertices})");
                 }
             }
         }
@@ -845,6 +870,11 @@ internal sealed class Options
     public required string TestRepo { get; init; }
     public required int TimeoutMinutes { get; init; }
     public required string WorkspaceSlug { get; init; }
+    // Accuracy thresholds — default 1/0/0 (infrastructure smoke test).
+    // Set higher for eShop validation: --min-services 6 --min-events 8 --min-endpoints 10
+    public int MinServices { get; init; } = 1;
+    public int MinEvents { get; init; } = 0;
+    public int MinEndpoints { get; init; } = 0;
 
     public static Options Parse(string[] args)
     {
@@ -858,6 +888,9 @@ internal sealed class Options
         string testRepo = "https://github.com/Smbatyan/blot-stars";
         int timeoutMinutes = 30;
         string? workspaceSlug = null;
+        int minServices = 1;
+        int minEvents = 0;
+        int minEndpoints = 0;
 
         for (int i = 0; i < args.Length; i++)
         {
@@ -872,6 +905,12 @@ internal sealed class Options
                 case "--timeout-minutes" when next is not null:
                     timeoutMinutes = int.Parse(next, CultureInfo.InvariantCulture); i++; break;
                 case "--workspace-slug" when next is not null: workspaceSlug = next; i++; break;
+                case "--min-services" when next is not null:
+                    minServices = int.Parse(next, CultureInfo.InvariantCulture); i++; break;
+                case "--min-events" when next is not null:
+                    minEvents = int.Parse(next, CultureInfo.InvariantCulture); i++; break;
+                case "--min-endpoints" when next is not null:
+                    minEndpoints = int.Parse(next, CultureInfo.InvariantCulture); i++; break;
                 case "-h":
                 case "--help":
                     PrintHelp();
@@ -890,6 +929,9 @@ internal sealed class Options
             TestRepo = testRepo,
             TimeoutMinutes = timeoutMinutes,
             WorkspaceSlug = workspaceSlug,
+            MinServices = minServices,
+            MinEvents = minEvents,
+            MinEndpoints = minEndpoints,
         };
     }
 
@@ -902,7 +944,16 @@ internal sealed class Options
         Console.WriteLine("  --test-repo          (default https://github.com/Smbatyan/blot-stars)");
         Console.WriteLine("  --timeout-minutes    (default 30)");
         Console.WriteLine("  --workspace-slug     (default validation-<timestamp>)");
+        Console.WriteLine("  --min-services       minimum Service nodes required (default 1)");
+        Console.WriteLine("  --min-events         minimum Event nodes required (default 0)");
+        Console.WriteLine("  --min-endpoints      minimum Endpoint nodes required (default 0)");
         Console.WriteLine("Env: VALIDATION_GITHUB_PAT  optional PAT for private repos");
+        Console.WriteLine();
+        Console.WriteLine("eShop accuracy run example:");
+        Console.WriteLine("  dotnet run --project ArchMind.Validation -- \\");
+        Console.WriteLine("    --test-repo https://github.com/dotnet/eShop \\");
+        Console.WriteLine("    --min-services 6 --min-events 8 --min-endpoints 10 \\");
+        Console.WriteLine("    --timeout-minutes 45");
         Console.WriteLine();
         Console.WriteLine("Exit codes: 0 = all checks pass; 1 = at least one failure.");
     }
