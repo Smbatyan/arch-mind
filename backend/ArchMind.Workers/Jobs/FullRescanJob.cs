@@ -23,6 +23,7 @@ namespace ArchMind.Workers.Jobs;
 /// Retry policy: at most one retry, matching <see cref="InitialScanJob"/>.
 /// </summary>
 [AutomaticRetry(Attempts = 1)]
+[Queue("scan")]
 public sealed class FullRescanJob
 {
     private readonly IRepoScanPipeline _pipeline;

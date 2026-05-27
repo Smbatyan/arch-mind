@@ -106,3 +106,18 @@ public sealed record NodeSearchHit(
     string? Name,
     string? Description,
     IReadOnlyDictionary<string, object?> Properties);
+
+// ── Graph visualization data ─────────────────────────────────────────────────
+
+public sealed record VisualizationNode(Guid Id, string Label, string? Name, Guid? RepoId = null);
+
+public sealed record VisualizationEdge(Guid SourceId, Guid TargetId, string Label);
+
+/// <summary>
+/// Flat node+edge payload for the visual graph canvas.
+/// <see cref="Truncated"/> is true when the node cap was hit.
+/// </summary>
+public sealed record VisualizationData(
+    IReadOnlyList<VisualizationNode> Nodes,
+    IReadOnlyList<VisualizationEdge> Edges,
+    bool Truncated);

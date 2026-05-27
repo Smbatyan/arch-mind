@@ -1,5 +1,7 @@
 export const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  typeof window === "undefined"
+    ? process.env.INTERNAL_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000"
+    : process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
 
 export async function api<T = unknown>(
   path: string,

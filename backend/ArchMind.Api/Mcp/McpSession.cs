@@ -9,12 +9,13 @@ namespace ArchMind.Api.Mcp;
 /// </summary>
 public sealed class McpSession
 {
-    public McpSession(Guid id, Guid workspaceId, DateTime createdAt)
+    public McpSession(Guid id, Guid workspaceId, DateTime createdAt, Guid? apiKeyId = null)
     {
         Id = id;
         WorkspaceId = workspaceId;
         CreatedAt = createdAt;
         LastActivityAt = createdAt;
+        ApiKeyId = apiKeyId;
 
         // Unbounded for the scaffold — bounded + backpressure will land alongside tools/call.
         Channel = System.Threading.Channels.Channel.CreateUnbounded<string>(new UnboundedChannelOptions
@@ -26,6 +27,7 @@ public sealed class McpSession
 
     public Guid Id { get; }
     public Guid WorkspaceId { get; }
+    public Guid? ApiKeyId { get; init; }
     public DateTime CreatedAt { get; }
     public DateTime LastActivityAt { get; set; }
 

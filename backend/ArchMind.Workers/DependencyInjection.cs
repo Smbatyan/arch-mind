@@ -27,6 +27,10 @@ public static class DependencyInjection
         // after per-file extraction has settled.
         services.AddScoped<CrossFileCorrelationJob>();
 
+        // Workspace-scoped graph connector. Scheduled by CrossFileCorrelationJob
+        // after each repo's correlation settles, to wire CALLS edges across repos.
+        services.AddScoped<CrossRepoCorrelationJob>();
+
         // BE-024: per-repo recurring poll job + registration plumbing.
         services.AddScoped<PollRepoJob>();
         services.AddOptions<PollingOptions>().BindConfiguration("Polling");

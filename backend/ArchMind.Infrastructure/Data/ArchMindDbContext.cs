@@ -112,6 +112,11 @@ public class ArchMindDbContext : DbContext
                 .HasColumnName("workspace_id")
                 .HasColumnType("uuid")
                 .IsRequired();
+            b.Property(x => x.Name)
+                .HasColumnName("name")
+                .HasMaxLength(200)
+                .HasDefaultValue(string.Empty)
+                .IsRequired();
             b.Property(x => x.GitHubUrl)
                 .HasColumnName("github_url")
                 .HasMaxLength(500)

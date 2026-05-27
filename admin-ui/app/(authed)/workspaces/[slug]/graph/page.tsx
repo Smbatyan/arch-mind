@@ -4,7 +4,9 @@ import { redirect } from "next/navigation";
 import { GraphBrowser, type GraphLabelsResponse } from "./graph-browser";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  (typeof window === "undefined" ? process.env.INTERNAL_API_URL : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:5000";
 
 type WorkspaceDetail = {
   id: string;

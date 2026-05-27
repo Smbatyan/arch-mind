@@ -468,6 +468,14 @@ namespace ArchMind.Infrastructure.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("last_processed_sha");
 
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasDefaultValue("")
+                        .HasColumnName("name");
+
                     b.Property<string>("PatToken")
                         .IsRequired()
                         .HasMaxLength(500)

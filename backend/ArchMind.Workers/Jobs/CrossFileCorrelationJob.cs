@@ -129,6 +129,9 @@ public sealed class CrossFileCorrelationJob
     private readonly ILlmExtractionCacheService _cache;
     private readonly IClarificationIntake _clarificationIntake;
     private readonly IClarificationQuestionGenerator _questionGenerator;
+    private readonly IBackgroundJobClient _backgroundJobClient;
+    private readonly IGraphifyContextService _graphifyContext;
+    private readonly IRepoManifestService _manifestService;
     private readonly ILogger<CrossFileCorrelationJob> _logger;
 
     public CrossFileCorrelationJob(
@@ -139,6 +142,9 @@ public sealed class CrossFileCorrelationJob
         ILlmExtractionCacheService cache,
         IClarificationIntake clarificationIntake,
         IClarificationQuestionGenerator questionGenerator,
+        IBackgroundJobClient backgroundJobClient,
+        IGraphifyContextService graphifyContext,
+        IRepoManifestService manifestService,
         ILogger<CrossFileCorrelationJob> logger)
     {
         _router = router;
@@ -148,6 +154,9 @@ public sealed class CrossFileCorrelationJob
         _cache = cache;
         _clarificationIntake = clarificationIntake;
         _questionGenerator = questionGenerator;
+        _backgroundJobClient = backgroundJobClient;
+        _graphifyContext = graphifyContext;
+        _manifestService = manifestService;
         _logger = logger;
     }
 
@@ -243,7 +252,7 @@ public sealed class CrossFileCorrelationJob
         }
 
         // 4. Apply the result.
-        await ApplyToGraphAsync(workspaceId, repoId, result, ct);
+        await ApplyToGraphAsync(workspaceId, repoId, result, extractions, ct);
         await PersistConflictsAsync(workspaceId, repoId, result, ct);
         await EmitClarificationsAsync(workspaceId, repoId, result, ct);
 
@@ -258,6 +267,71 @@ public sealed class CrossFileCorrelationJob
             result.Events.Count,
             result.Conventions.Count,
             result.Conflicts.Count);
+
+        // 6. Connect graphs across repos. Dedupe any in-flight CrossRepo jobs
+        // for THIS workspace first so parallel per-repo scans don't all race
+        // their own CrossRepo pass with partial data and burn LLM tokens on
+        // stale snapshots. Last writer wins — the latest schedule sees the
+        // most repos' CrossFile output.
+        await DedupePendingCrossRepoAsync(workspaceId, ct);
+        _backgroundJobClient.Schedule<CrossRepoCorrelationJob>(
+            j => j.RunAsync(workspaceId, default),
+            TimeSpan.FromMinutes(1));
+    }
+
+    /// <summary>
+    /// Cancel any Enqueued/Scheduled CrossRepoCorrelationJob already in flight
+    /// for <paramref name="workspaceId"/>. Used to coalesce parallel-repo scans
+    /// onto a single workspace-wide correlator run instead of N races.
+    ///
+    /// Matches on workspace id substring in <c>arguments</c> JSON. This is
+    /// brittle if the Hangfire job-data format changes, but it's the cheapest
+    /// dedupe primitive that doesn't require a separate coordination table.
+    /// Failures are swallowed — at worst we end up with one extra redundant
+    /// CrossRepo run, which is recoverable.
+    /// </summary>
+    private async Task DedupePendingCrossRepoAsync(Guid workspaceId, CancellationToken ct)
+    {
+        try
+        {
+            var conn = _db.Database.GetDbConnection();
+            await _db.Database.OpenConnectionAsync(ct);
+            try
+            {
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = """
+                    WITH dupes AS (
+                        SELECT id FROM hangfire.job
+                        WHERE invocationdata::text LIKE '%CrossRepoCorrelationJob%'
+                          AND arguments::text LIKE @wsPattern
+                          AND statename IN ('Enqueued', 'Scheduled')
+                    ),
+                    qdel AS (DELETE FROM hangfire.jobqueue WHERE jobid IN (SELECT id FROM dupes) RETURNING jobid)
+                    DELETE FROM hangfire.job WHERE id IN (SELECT id FROM dupes);
+                    """;
+                var p = cmd.CreateParameter();
+                p.ParameterName = "@wsPattern";
+                p.Value = $"%{workspaceId}%";
+                cmd.Parameters.Add(p);
+                var dropped = await cmd.ExecuteNonQueryAsync(ct);
+                if (dropped > 0)
+                {
+                    _logger.LogInformation(
+                        "CrossFileCorrelationJob deduped {Count} pending CrossRepoCorrelationJob(s) for workspace={WorkspaceId}",
+                        dropped, workspaceId);
+                }
+            }
+            finally
+            {
+                await _db.Database.CloseConnectionAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "CrossFileCorrelationJob CrossRepo dedupe failed workspace={WorkspaceId}; continuing — at worst one extra run.",
+                workspaceId);
+        }
     }
 
     /// <summary>
@@ -270,10 +344,100 @@ public sealed class CrossFileCorrelationJob
         Guid workspaceId,
         Guid repoId,
         CorrelationResult result,
+        IReadOnlyList<FileExtractionRow> extractions,
         CancellationToken ct)
     {
+        // Build a file_path → canonical service name map from the merged
+        // services' SourceFiles. Used to stitch orphan Endpoint/Storage nodes
+        // (extracted in files where no service was identified) back to their
+        // owning service.
+        var fileToService = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var svc in result.Services)
+        {
+            if (string.IsNullOrWhiteSpace(svc.Name)) continue;
+            foreach (var f in svc.SourceFiles)
+            {
+                if (string.IsNullOrWhiteSpace(f)) continue;
+                fileToService[NormalisePath(f)] = svc.Name;
+            }
+        }
+
+        // Fallback: scan file_extractions for files that named a service.
+        // LLM-returned SourceFiles is often incomplete; this guarantees every
+        // file where the per-file extractor identified a service gets mapped.
+        // Also handles services that exist in extractions but were dropped
+        // from the correlator's canonical list.
+        var serviceNames = new HashSet<string>(
+            result.Services.Where(s => !string.IsNullOrWhiteSpace(s.Name)).Select(s => s.Name!),
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var row in extractions)
+        {
+            FileExtractionRecord? rec;
+            try { rec = JsonSerializer.Deserialize<FileExtractionRecord>(row.ExtractionPayload, PayloadJsonOptions); }
+            catch { continue; }
+            if (rec?.Service?.IsPartOfService != true) continue;
+            var name = rec.Service.ServiceName;
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            // Prefer canonical-named services, but accept any service the
+            // per-file extractor identified — better to stitch under a
+            // non-canonical name than to leave endpoints orphaned.
+            if (!serviceNames.Contains(name))
+            {
+                // Map to canonical via case-insensitive contains — handles
+                // minor casing differences between per-file claims and the
+                // correlator's normalised name.
+                var canonical = result.Services.FirstOrDefault(s =>
+                    !string.IsNullOrWhiteSpace(s.Name)
+                    && (s.Name!.Equals(name, StringComparison.OrdinalIgnoreCase)
+                        || s.AliasNames.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase))));
+                if (canonical?.Name is { Length: > 0 } canonicalName) name = canonicalName;
+            }
+            fileToService.TryAdd(NormalisePath(row.FilePath), name!);
+        }
+
+        // Auto-synthesise a Service when no per-file extractor identified one
+        // (frontend / mobile / mostly-data repos). Manifest scan yields a stable
+        // name + kind + language. Every extraction file gets mapped to it so
+        // stitching can wire endpoints/storage to the synthetic service.
+        var manifest = await _manifestService.ReadAsync(workspaceId, repoId, ct);
+        var syntheticServiceName = (string?)null;
+        if (fileToService.Count == 0 && !manifest.IsEmpty)
+        {
+            syntheticServiceName = manifest.Name;
+            foreach (var row in extractions)
+            {
+                if (!string.IsNullOrWhiteSpace(row.FilePath))
+                    fileToService.TryAdd(NormalisePath(row.FilePath), syntheticServiceName);
+            }
+            _logger.LogInformation(
+                "CrossFileCorrelationJob synthesised service from manifest: workspace={WorkspaceId} repo={RepoId} name={Name} kind={Kind} language={Language} packages={Pkgs} internal={Internal}",
+                workspaceId, repoId, manifest.Name, manifest.Kind, manifest.Language,
+                manifest.Packages.Count, manifest.InternalPackages.Count);
+        }
+
         await _graphWriter.ExecuteInTransactionAsync(async session =>
         {
+            // ---- Synthetic Service (when LLM extraction found none) ----
+            if (syntheticServiceName is not null)
+            {
+                var synthId = DeterministicGuid($"Service|{workspaceId}|{syntheticServiceName}");
+                await session.UpsertNodeAsync(new GraphNodeSpec(
+                    workspaceId,
+                    "Service",
+                    synthId,
+                    new Dictionary<string, object?>
+                    {
+                        ["name"] = syntheticServiceName,
+                        ["kind"] = manifest.Kind,
+                        ["language"] = manifest.Language,
+                        ["packages"] = manifest.Packages,
+                        ["internal_packages"] = manifest.InternalPackages,
+                        ["repo_id"] = repoId.ToString(),
+                        ["workspace_id"] = workspaceId.ToString(),
+                        ["synthesised"] = true,
+                    }), ct);
+            }
+
             // ---- Canonical services ----
             foreach (var svc in result.Services)
             {
@@ -292,6 +456,12 @@ public sealed class CrossFileCorrelationJob
                         ["source_files"] = svc.SourceFiles,
                         ["repo_id"] = repoId.ToString(),
                         ["workspace_id"] = workspaceId.ToString(),
+                        // Enrich with repo-level manifest so cross-repo correlator
+                        // can match SHARES_PACKAGE_WITH on common internal packages.
+                        ["kind"] = manifest.Kind,
+                        ["language"] = manifest.Language,
+                        ["packages"] = manifest.Packages,
+                        ["internal_packages"] = manifest.InternalPackages,
                     }), ct);
             }
 
@@ -363,8 +533,373 @@ public sealed class CrossFileCorrelationJob
                         workspaceId, "FOLLOWS", serviceId, conventionId), ct);
                 }
             }
+
+            // ---- Stitch orphan Endpoint / Storage nodes to their owning service ----
+            // Per-file LlmExtractionJob only writes EXPOSES / WRITES_TO / READS_FROM
+            // edges when the same file also identified a Service. Most files don't
+            // (controllers live separately from Program.cs / Startup), so most of
+            // those edges are missing. Rewire them here using the canonical
+            // file → service map built above.
+            var exposesCount = 0;
+            var storageEdgeCount = 0;
+            var unmatchedFiles = 0;
+            _logger.LogInformation(
+                "CrossFileCorrelationJob stitching: workspace={WorkspaceId} repo={RepoId} services={Svcs} fileMap={MapSize} extractions={Rows}",
+                workspaceId, repoId, result.Services.Count, fileToService.Count, extractions.Count);
+            foreach (var row in extractions)
+            {
+                FileExtractionRecord? record;
+                try
+                {
+                    record = JsonSerializer.Deserialize<FileExtractionRecord>(
+                        row.ExtractionPayload, PayloadJsonOptions);
+                }
+                catch
+                {
+                    continue;
+                }
+                if (record is null) continue;
+
+                var owningServiceName = ResolveOwningService(row.FilePath, fileToService);
+                if (string.IsNullOrWhiteSpace(owningServiceName))
+                {
+                    unmatchedFiles++;
+                    continue;
+                }
+
+                var serviceId = DeterministicGuid($"Service|{workspaceId}|{owningServiceName}");
+
+                // Heuristic: Clean-architecture application-layer artifacts
+                // (UseCase / Handler / Command / Query / CommandHandler /
+                // QueryHandler) are not modeled by any LLM prompt today. Emit
+                // a Capability node + IMPLEMENTS edge so they show up in the
+                // graph without a per-file LLM round-trip. File-name-only —
+                // costs nothing.
+                var capabilityName = TryExtractCapabilityName(row.FilePath);
+                if (capabilityName is not null)
+                {
+                    var capabilityId = DeterministicGuid(
+                        $"Capability|{workspaceId}|{capabilityName}");
+                    await session.UpsertNodeAsync(new GraphNodeSpec(
+                        workspaceId,
+                        "Capability",
+                        capabilityId,
+                        new Dictionary<string, object?>
+                        {
+                            ["name"] = capabilityName,
+                            ["kind"] = ClassifyCapabilityKind(row.FilePath),
+                            ["file_path"] = row.FilePath,
+                            ["repo_id"] = repoId.ToString(),
+                            ["workspace_id"] = workspaceId.ToString(),
+                        }), ct);
+                    await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                        workspaceId, "IMPLEMENTS", serviceId, capabilityId), ct);
+                }
+
+                if (record.Endpoints?.Endpoints is { Count: > 0 } eps)
+                {
+                    foreach (var ep in eps)
+                    {
+                        if (string.IsNullOrWhiteSpace(ep.Method) || string.IsNullOrWhiteSpace(ep.Path))
+                            continue;
+                        var endpointId = DeterministicGuid($"Endpoint|{workspaceId}|{ep.Method}|{ep.Path}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "EXPOSES", serviceId, endpointId), ct);
+                        exposesCount++;
+                    }
+                }
+
+                if (record.Storage?.Storages is { Count: > 0 } storages)
+                {
+                    foreach (var s in storages)
+                    {
+                        if (string.IsNullOrWhiteSpace(s.Name)) continue;
+                        var storageId = DeterministicGuid($"Storage|{workspaceId}|{s.Name}");
+                        var edgeLabel = string.Equals(s.Access, "owns", StringComparison.OrdinalIgnoreCase)
+                            ? "WRITES_TO"
+                            : "READS_FROM";
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, edgeLabel, serviceId, storageId), ct);
+                        storageEdgeCount++;
+                    }
+                }
+
+                // Integration contracts stitching — wire outbound CALLS and
+                // messaging PUBLISHES/CONSUMES to the owning service even when
+                // the file itself didn't identify one. Node ids already match
+                // their cross-repo counterparts because per-file projection
+                // uses the same deterministic GUID formula.
+                if (record.IntegrationContracts is { } ic)
+                {
+                    foreach (var call in ic.HttpClientCalls ?? Array.Empty<HttpClientCall>())
+                    {
+                        if (string.IsNullOrWhiteSpace(call.Method) || string.IsNullOrWhiteSpace(call.Path))
+                            continue;
+                        var method = call.Method.Trim().ToUpperInvariant();
+                        var path = NormaliseHttpPathForStitch(call.Path);
+                        if (path.Length == 0) continue;
+                        var endpointId = DeterministicGuid($"Endpoint|{workspaceId}|{method}|{path}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "CALLS", serviceId, endpointId,
+                            new Dictionary<string, object?> { ["transport"] = "http" }), ct);
+                    }
+                    foreach (var grpc in ic.GrpcClientCalls ?? Array.Empty<GrpcCall>())
+                    {
+                        if (string.IsNullOrWhiteSpace(grpc.Service) || string.IsNullOrWhiteSpace(grpc.Method))
+                            continue;
+                        var endpointId = DeterministicGuid(
+                            $"Endpoint|{workspaceId}|grpc|{grpc.Service}.{grpc.Method}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "CALLS", serviceId, endpointId,
+                            new Dictionary<string, object?> { ["transport"] = "grpc" }), ct);
+                    }
+                    foreach (var grpc in ic.GrpcServerImpls ?? Array.Empty<GrpcCall>())
+                    {
+                        if (string.IsNullOrWhiteSpace(grpc.Service) || string.IsNullOrWhiteSpace(grpc.Method))
+                            continue;
+                        var endpointId = DeterministicGuid(
+                            $"Endpoint|{workspaceId}|grpc|{grpc.Service}.{grpc.Method}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "EXPOSES", serviceId, endpointId), ct);
+                    }
+                    foreach (var hub in ic.SignalRHubMethods ?? Array.Empty<GrpcCall>())
+                    {
+                        if (string.IsNullOrWhiteSpace(hub.Service) || string.IsNullOrWhiteSpace(hub.Method))
+                            continue;
+                        var endpointId = DeterministicGuid(
+                            $"Endpoint|{workspaceId}|signalr|{hub.Service}.{hub.Method}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "EXPOSES", serviceId, endpointId), ct);
+                    }
+                    foreach (var inv in ic.SignalRClientInvokes ?? Array.Empty<GrpcCall>())
+                    {
+                        if (string.IsNullOrWhiteSpace(inv.Service) || string.IsNullOrWhiteSpace(inv.Method))
+                            continue;
+                        var endpointId = DeterministicGuid(
+                            $"Endpoint|{workspaceId}|signalr|{inv.Service}.{inv.Method}");
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "CALLS", serviceId, endpointId,
+                            new Dictionary<string, object?> { ["transport"] = "signalr" }), ct);
+                    }
+                    foreach (var ch in ic.MessagingPublishes ?? Array.Empty<MessagingChannel>())
+                    {
+                        var (label, id, _) = ResolveMessagingNodeForStitch(workspaceId, ch);
+                        if (id is null || label is null) continue;
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "PUBLISHES", serviceId, id.Value,
+                            new Dictionary<string, object?>
+                            {
+                                ["transport"] = ch.Kind,
+                                ["routing_key"] = ch.RoutingKey,
+                            }), ct);
+                    }
+                    foreach (var ch in ic.MessagingConsumes ?? Array.Empty<MessagingChannel>())
+                    {
+                        var (label, id, _) = ResolveMessagingNodeForStitch(workspaceId, ch);
+                        if (id is null || label is null) continue;
+                        await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                            workspaceId, "CONSUMES", serviceId, id.Value,
+                            new Dictionary<string, object?>
+                            {
+                                ["transport"] = ch.Kind,
+                                ["routing_key"] = ch.RoutingKey,
+                            }), ct);
+                    }
+                }
+            }
+
+            _logger.LogInformation(
+                "CrossFileCorrelationJob stitching done: workspace={WorkspaceId} repo={RepoId} exposes={Exposes} storageEdges={Storage} unmatchedFiles={Unmatched}",
+                workspaceId, repoId, exposesCount, storageEdgeCount, unmatchedFiles);
+
+            // ---- DEPENDS_ON (layer architecture) via graphify AST imports ----
+            // For each IMPORTS edge between two files in DIFFERENT services,
+            // emit a DEPENDS_ON(serviceA, serviceB) edge.
+            var graphifyOutput = await _graphifyContext.GetRepoGraphAsync(workspaceId, repoId, ct);
+            if (graphifyOutput is not null)
+            {
+                var nodeFileById = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var n in graphifyOutput.Nodes)
+                {
+                    if (!string.IsNullOrWhiteSpace(n.FilePath))
+                        nodeFileById[n.Id] = NormalisePath(n.FilePath);
+                }
+
+                var emittedDeps = new HashSet<(string, string)>();
+                foreach (var edge in graphifyOutput.Edges)
+                {
+                    if (!IsDependencyEdge(edge.Type)) continue;
+                    if (!nodeFileById.TryGetValue(edge.Source, out var srcFile)) continue;
+                    if (!nodeFileById.TryGetValue(edge.Target, out var tgtFile)) continue;
+
+                    if (!fileToService.TryGetValue(srcFile, out var srcSvc)) continue;
+                    if (!fileToService.TryGetValue(tgtFile, out var tgtSvc)) continue;
+                    if (string.Equals(srcSvc, tgtSvc, StringComparison.Ordinal)) continue;
+                    if (!emittedDeps.Add((srcSvc, tgtSvc))) continue;
+
+                    var srcId = DeterministicGuid($"Service|{workspaceId}|{srcSvc}");
+                    var tgtId = DeterministicGuid($"Service|{workspaceId}|{tgtSvc}");
+                    await session.UpsertEdgeAsync(new GraphEdgeSpec(
+                        workspaceId, "DEPENDS_ON", srcId, tgtId), ct);
+                }
+
+                _logger.LogInformation(
+                    "CrossFileCorrelationJob DEPENDS_ON edges emitted workspace={WorkspaceId} repo={RepoId} count={Count}",
+                    workspaceId, repoId, emittedDeps.Count);
+            }
         }, ct);
     }
+
+    private static string NormalisePath(string path)
+        => path.Replace('\\', '/').TrimStart('/');
+
+    private static string? ResolveOwningService(
+        string filePath, IReadOnlyDictionary<string, string> map)
+    {
+        var key = NormalisePath(filePath);
+        if (map.TryGetValue(key, out var direct)) return direct;
+
+        // Fallback 1: longest suffix-match (handles absolute vs relative path mismatches).
+        string? best = null;
+        var bestLen = 0;
+        foreach (var (candidate, svc) in map)
+        {
+            if (key.EndsWith(candidate, StringComparison.OrdinalIgnoreCase)
+                || candidate.EndsWith(key, StringComparison.OrdinalIgnoreCase))
+            {
+                if (candidate.Length > bestLen)
+                {
+                    bestLen = candidate.Length;
+                    best = svc;
+                }
+            }
+        }
+        if (best is not null) return best;
+
+        // Fallback 2: closest-ancestor directory match. For each mapped file,
+        // find the longest common directory prefix shared with our file, and
+        // pick the service whose mapped file shares the most directory levels.
+        // Handles typical layered architectures: UserService identified in
+        // Program.cs, UserController.cs lives in same project / sibling folder.
+        var keyDirs = key.Split('/');
+        var bestScore = 0;
+        foreach (var (candidate, svc) in map)
+        {
+            var candDirs = candidate.Split('/');
+            var common = 0;
+            var n = Math.Min(keyDirs.Length, candDirs.Length) - 1; // exclude file name
+            for (var i = 0; i < n; i++)
+            {
+                if (keyDirs[i].Equals(candDirs[i], StringComparison.OrdinalIgnoreCase))
+                    common++;
+                else break;
+            }
+            if (common > bestScore)
+            {
+                bestScore = common;
+                best = svc;
+            }
+        }
+        if (best is not null && bestScore > 0) return best;
+
+        // Fallback 3: single-service repo → everything belongs to it.
+        if (map.Values.Distinct(StringComparer.OrdinalIgnoreCase).Take(2).Count() == 1)
+            return map.Values.First();
+
+        return null;
+    }
+
+    /// <summary>
+    /// File-path → application-layer capability name (e.g.
+    /// "src/.../JoinTournamentUseCase.cs" → "JoinTournament"). Returns null
+    /// when the file is not recognisably a UseCase/Handler/Command/Query.
+    /// Suffix-strip is deliberate: a UseCase node should read as "what it
+    /// does", not "what kind of class encapsulates it".
+    /// </summary>
+    private static string? TryExtractCapabilityName(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return null;
+        var stem = Path.GetFileNameWithoutExtension(filePath);
+        if (string.IsNullOrWhiteSpace(stem)) return null;
+
+        string[] suffixes =
+        {
+            "CommandHandler", "QueryHandler", "EventHandler",
+            "UseCase", "Handler", "Command", "Query",
+        };
+        foreach (var suffix in suffixes)
+        {
+            if (stem.EndsWith(suffix, StringComparison.Ordinal)
+                && stem.Length > suffix.Length)
+            {
+                return stem[..^suffix.Length];
+            }
+        }
+        return null;
+    }
+
+    private static string ClassifyCapabilityKind(string filePath)
+    {
+        var stem = Path.GetFileNameWithoutExtension(filePath ?? string.Empty);
+        if (string.IsNullOrEmpty(stem)) return "use-case";
+        if (stem.EndsWith("CommandHandler", StringComparison.Ordinal)) return "command-handler";
+        if (stem.EndsWith("QueryHandler", StringComparison.Ordinal)) return "query-handler";
+        if (stem.EndsWith("EventHandler", StringComparison.Ordinal)) return "event-handler";
+        if (stem.EndsWith("Command", StringComparison.Ordinal)) return "command";
+        if (stem.EndsWith("Query", StringComparison.Ordinal)) return "query";
+        if (stem.EndsWith("Handler", StringComparison.Ordinal)) return "handler";
+        return "use-case";
+    }
+
+    private static string NormaliseHttpPathForStitch(string raw)
+    {
+        var path = raw.Trim();
+        var qi = path.IndexOf('?');
+        if (qi >= 0) path = path[..qi];
+        var hi = path.IndexOf('#');
+        if (hi >= 0) path = path[..hi];
+        var schemeIdx = path.IndexOf("://", StringComparison.Ordinal);
+        if (schemeIdx >= 0)
+        {
+            var afterScheme = schemeIdx + 3;
+            var slashAfterHost = path.IndexOf('/', afterScheme);
+            path = slashAfterHost >= 0 ? path[slashAfterHost..] : "/";
+        }
+        if (!path.StartsWith('/')) path = "/" + path;
+        while (path.Contains("//", StringComparison.Ordinal)) path = path.Replace("//", "/");
+        return path;
+    }
+
+    private static (string? Label, Guid? Id, string Name) ResolveMessagingNodeForStitch(
+        Guid workspaceId, MessagingChannel ch)
+    {
+        var name =
+            FirstNonEmptyStr(ch.Topic, ch.Exchange, ch.Queue, ch.MessageType, ch.RoutingKey);
+        if (name is null) return (null, null, string.Empty);
+
+        var kind = ch.Kind ?? string.Empty;
+        var label = (!string.IsNullOrWhiteSpace(ch.Queue)
+            || kind.Contains("rabbit", StringComparison.OrdinalIgnoreCase)
+            || kind.Contains("sqs", StringComparison.OrdinalIgnoreCase))
+            ? "Queue"
+            : "Event";
+        var id = DeterministicGuid($"{label}|{workspaceId}|{name}|");
+        return (label, id, name);
+    }
+
+    private static string? FirstNonEmptyStr(params string?[] values)
+    {
+        foreach (var v in values)
+            if (!string.IsNullOrWhiteSpace(v)) return v.Trim();
+        return null;
+    }
+
+    private static bool IsDependencyEdge(string edgeType) =>
+        edgeType.Equals("imports", StringComparison.OrdinalIgnoreCase)
+        || edgeType.Equals("import", StringComparison.OrdinalIgnoreCase)
+        || edgeType.Equals("calls", StringComparison.OrdinalIgnoreCase)
+        || edgeType.Equals("depends_on", StringComparison.OrdinalIgnoreCase)
+        || edgeType.Equals("uses", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Persist any conflicts surfaced by the correlator. We log a warning per

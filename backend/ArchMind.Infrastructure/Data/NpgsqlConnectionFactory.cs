@@ -24,19 +24,31 @@ namespace ArchMind.Infrastructure.Data;
 /// </remarks>
 internal sealed class NpgsqlConnectionFactory : IDbConnectionFactory
 {
-    private readonly string _connectionString;
+    private readonly NpgsqlDataSource _dataSource;
 
     public NpgsqlConnectionFactory(IConfiguration configuration)
     {
-        _connectionString = configuration.GetConnectionString("Default")
+        var connectionString = configuration.GetConnectionString("Default")
             ?? throw new InvalidOperationException(
                 "ConnectionStrings:Default is not configured.");
+
+        // Build a dedicated data source with unmapped types enabled. AGE's
+        // `cypher()` function requires its third argument to be a parameter
+        // typed as `ag_catalog.agtype`. Npgsql does not ship a built-in mapping
+        // for agtype, so without EnableUnmappedTypes() it refuses to serialize
+        // a .NET string into a parameter declared as that type, throwing
+        // "Writing values of 'System.String' is not supported for parameters
+        // having DataTypeName 'ag_catalog.agtype'". With the flag enabled
+        // Npgsql falls back to the text encoder; Postgres then calls
+        // `agtype_in()` to coerce the literal into a real agtype value.
+        var builder = new NpgsqlDataSourceBuilder(connectionString);
+        builder.EnableUnmappedTypes();
+        _dataSource = builder.Build();
     }
 
     public async Task<DbConnection> OpenAsync(CancellationToken ct = default)
     {
-        var conn = new NpgsqlConnection(_connectionString);
-        await conn.OpenAsync(ct).ConfigureAwait(false);
+        var conn = await _dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
 
         // AGE per-session bootstrap. Must run after every physical connection
         // open. Cheap (no-op if already loaded in the backend process).

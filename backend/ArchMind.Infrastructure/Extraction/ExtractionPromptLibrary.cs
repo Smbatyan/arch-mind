@@ -13,7 +13,7 @@ namespace ArchMind.Infrastructure.Extraction;
 /// </summary>
 public static class ExtractionPromptLibrary
 {
-    public const string CurrentVersion = "2026-05-25/v1";
+    public const string CurrentVersion = "2026-05-27/v3-route-combine";
 
     public static IReadOnlyDictionary<ExtractionPromptId, ExtractionPrompt> All { get; } =
         BuildAll();
@@ -28,6 +28,7 @@ public static class ExtractionPromptLibrary
             [ExtractionPromptId.ExtractEventConsumers] = BuildExtractEventConsumers(),
             [ExtractionPromptId.ExtractStorageOwnership] = BuildExtractStorageOwnership(),
             [ExtractionPromptId.InferConventions] = BuildInferConventions(),
+            [ExtractionPromptId.ExtractIntegrationContracts] = BuildExtractIntegrationContracts(),
             [ExtractionPromptId.QuestionGeneration] = BuildQuestionGeneration(),
         };
         return new ReadOnlyDictionary<ExtractionPromptId, ExtractionPrompt>(map);
@@ -42,23 +43,15 @@ public static class ExtractionPromptLibrary
         ToolName: "report_service_identity",
         ToolDescription: "Report whether the source file belongs to a microservice and, if so, its name, purpose, and tech stack.",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and decide whether it belongs to an identifiable microservice / deployable
-            unit, and if so describe that service.
+            Decide if file part of microservice. Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant (README, image, lock file, generated code,
-              vendored third-party library), emit an empty/negative result
-              (IsPartOfService=false, empty TechStack), NOT a refusal.
-            - Be precise. Prefer null/empty over guessing.
-            - Service identity hints: Program.cs / main.go / app.py / manage.py /
-              package.json "name", Dockerfile, deployment manifests, README service
-              headings, namespace/package names, csproj/pom.xml/build.gradle.
-            - TechStack should be concrete and short (e.g. ["aspnet-core", "ef-core",
-              "postgres"], ["express", "node"], ["fastapi", "python"]).
-            - RootPath is the directory that looks like the service root relative to
-              the repo (e.g. "services/billing", "backend"). Null if unknown.
+            - One tool call.
+            - Irrelevant file (README, image, lockfile, generated, vendored) → IsPartOfService=false, empty TechStack. NOT refusal.
+            - Prefer null/empty over guess.
+            - Identity hints: Program.cs, main.go, app.py, manage.py, package.json "name", Dockerfile, deploy manifests, README headings, namespace/package, csproj/pom.xml/build.gradle.
+            - TechStack: concrete short list. e.g. ["aspnet-core","ef-core","postgres"], ["express","node"], ["fastapi","python"].
+            - RootPath: service-root dir relative to repo. e.g. "services/billing", "backend". Null if unknown.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -95,26 +88,17 @@ public static class ExtractionPromptLibrary
         ToolName: "report_http_endpoints",
         ToolDescription: "Report HTTP endpoints (routes) declared or registered in this file.",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and extract HTTP endpoints (routes) that this file declares or registers.
+            Extract HTTP routes declared/registered in file. Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant (README, image, infra config without
-              routes), emit an empty Endpoints array, NOT a refusal.
-            - Look for ASP.NET Core (app.MapGet/MapPost, [HttpGet("...")],
-              [Route("...")]), Express (app.get/post/put/delete/use("...", ...)),
-              Flask/FastAPI (@app.route, @router.get), Spring (@GetMapping,
-              @RequestMapping), Gin/Echo/Chi (router.GET, e.GET), Rails routes,
-              and similar.
-            - Method is uppercased HTTP verb: GET, POST, PUT, PATCH, DELETE.
-              If a single registration covers multiple verbs, emit one endpoint per verb.
-            - Path is the route template exactly as written (e.g. "/api/users/{id}").
-              Preserve placeholder syntax.
-            - HandlerSymbol is the function/method/class name that handles the route
-              (e.g. "UsersController.GetById", "handleCreate", "users#show").
-              If the handler is an inline lambda with no name, use "<lambda>".
-            - Do NOT invent endpoints. If unsure, omit.
+            - One tool call.
+            - Irrelevant file → empty Endpoints array. NOT refusal.
+            - Frameworks: ASP.NET (MapGet/MapPost, [HttpGet("...")], [Route]), Express (app.get/post/put/delete), Flask/FastAPI (@app.route, @router.get), Spring (@GetMapping/@RequestMapping), Gin/Echo/Chi (router.GET, e.GET), Rails routes.
+            - Method: uppercase HTTP verb. Multi-verb registration → one row per verb.
+            - Path: route template verbatim e.g. "/api/users/{id}". Preserve placeholders.
+            - HandlerSymbol: function/method/class name. e.g. "UsersController.GetById", "handleCreate". Unnamed lambda → "<lambda>".
+            - No invented endpoints. Unsure → omit.
+            - ASP.NET ROUTE COMBINING: When a class has [Route("prefix")] and a method has [HttpGet], [HttpPost] etc. with NO path argument, the full path is just the class prefix. e.g. [Route("api/random")] + [HttpGet] → GET /api/random. [Route("api/users")] + [HttpPost] → POST /api/users. Always combine class-level [Route] with method-level HTTP verb attributes even when the verb attribute has no path string.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -159,29 +143,17 @@ public static class ExtractionPromptLibrary
         ToolName: "report_event_publishers",
         ToolDescription: "Report message-bus / event-stream events that this file PUBLISHES.",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and extract events / messages this file PUBLISHES (produces / sends /
-            emits) to a message bus or event stream.
+            Extract events/messages this file PUBLISHES (produces/sends/emits) to bus or stream. Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant, emit an empty Publishes array, NOT a refusal.
-            - Look for Kafka producers (producer.Send, ProduceAsync),
-              RabbitMQ / MassTransit (IBus.Publish, channel.BasicPublish),
-              AWS SNS/SQS (sns.publish, sqs.sendMessage),
-              Azure Service Bus (ServiceBusSender.SendMessageAsync),
-              Google Pub/Sub (publisher.publish), NATS (nc.Publish),
-              Redis Streams (XADD), Kinesis (PutRecord), and similar.
-            - Name is the event/message type or topic-as-event name
-              (e.g. "OrderCreated", "user.signup.v1").
-            - Version is the explicit version if present in the type/topic/header
-              (e.g. "v1", "2"); otherwise null.
-            - SchemaSummary is a one-line description of the payload fields if you
-              can see them in the file; otherwise null.
-            - Topic is the destination topic / queue / channel name if visible;
-              otherwise null.
-            - Only emit events that this file ACTIVELY publishes. Do NOT include
-              consumer handlers or test fixtures.
+            - One tool call.
+            - Irrelevant → empty Publishes array. NOT refusal.
+            - Look for: Kafka producers (Send/ProduceAsync), RabbitMQ/MassTransit (IBus.Publish, channel.BasicPublish), AWS SNS/SQS (sns.publish, sqs.sendMessage), Azure Service Bus (ServiceBusSender.SendMessageAsync), Google Pub/Sub (publisher.publish), NATS (nc.Publish), Redis Streams (XADD), Kinesis (PutRecord).
+            - Name: event/message type or topic-as-event. e.g. "OrderCreated", "user.signup.v1".
+            - Version: explicit version in type/topic/header e.g. "v1","2"; else null.
+            - SchemaSummary: one-line payload field description if visible; else null.
+            - Topic: destination topic/queue/channel name if visible; else null.
+            - Only ACTIVELY published. No consumer handlers or test fixtures.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -227,26 +199,17 @@ public static class ExtractionPromptLibrary
         ToolName: "report_event_consumers",
         ToolDescription: "Report message-bus / event-stream events that this file CONSUMES.",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and extract events / messages this file CONSUMES (subscribes / handles /
-            receives) from a message bus or event stream.
+            Extract events/messages this file CONSUMES (subscribes/handles/receives) from bus or stream. Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant, emit an empty Consumes array, NOT a refusal.
-            - Look for Kafka consumers (Consume, AddConsumer<T>),
-              RabbitMQ / MassTransit (IConsumer<T>, channel.BasicConsume),
-              AWS SQS handlers, Azure Service Bus (ServiceBusProcessor / [ServiceBusTrigger]),
-              Google Pub/Sub subscribers, NATS (nc.Subscribe),
-              Redis Streams (XREADGROUP), Kinesis (GetRecords), and similar.
-            - Name is the event/message type being consumed
-              (e.g. "OrderCreated", "user.signup.v1").
-            - Version is the explicit version if present; otherwise null.
-            - SchemaSummary is a one-line description of the payload fields if
-              visible; otherwise null.
-            - Topic is the source topic / queue / channel if visible; otherwise null.
-            - Only emit events that this file ACTIVELY consumes. Do NOT include
-              producers or shared DTO definitions without a handler.
+            - One tool call.
+            - Irrelevant → empty Consumes array. NOT refusal.
+            - Look for: Kafka consumers (Consume, AddConsumer<T>), RabbitMQ/MassTransit (IConsumer<T>, channel.BasicConsume), AWS SQS handlers, Azure Service Bus (ServiceBusProcessor, [ServiceBusTrigger]), Google Pub/Sub subscribers, NATS (nc.Subscribe), Redis Streams (XREADGROUP), Kinesis (GetRecords).
+            - Name: event/message type consumed. e.g. "OrderCreated", "user.signup.v1".
+            - Version: explicit version if present; else null.
+            - SchemaSummary: one-line payload field description if visible; else null.
+            - Topic: source topic/queue/channel if visible; else null.
+            - Only ACTIVELY consumed. No producers or shared DTO defs without handler.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -292,29 +255,16 @@ public static class ExtractionPromptLibrary
         ToolName: "report_storage_dependencies",
         ToolDescription: "Report storage systems (databases, caches, blob stores, search indexes) referenced by this file and whether the file's service OWNS or READS them.",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and extract storage dependencies (databases, caches, blob stores, search
-            indexes, queues-as-storage) referenced by this file.
+            Extract storage deps (DB/cache/blob/search/queues-as-storage). Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant, emit an empty Storages array, NOT a refusal.
-            - Look for: connection strings, EF Core / Dapper / SQLAlchemy / TypeORM /
-              GORM / ActiveRecord setup, MongoDB clients, Redis clients (StackExchange.Redis,
-              ioredis), Elasticsearch / OpenSearch clients, S3 / Azure Blob / GCS SDK
-              calls, schema migrations (Flyway, Alembic, EF migrations).
-            - Type values (concrete, lowercase): "postgres", "mysql", "sqlserver",
-              "sqlite", "mongodb", "redis", "elasticsearch", "opensearch", "s3",
-              "azure-blob", "gcs", "dynamodb", "cassandra", "other".
-            - Access is "owns" if the file/service appears to define the schema,
-              run migrations, or be the system of record. Use "reads" if it only
-              queries / fetches without owning the schema. When uncertain, use "reads".
-            - Name is the database name, bucket name, index name, or logical
-              identifier (e.g. "billing_db", "user-avatars", "orders-index").
-              Use the most specific name visible.
-            - ConnectionHint is the connection-string variable, config key, or host
-              snippet if visible (e.g. "ConnectionStrings:BillingDb",
-              "DATABASE_URL"); otherwise null. Do NOT include secret values.
+            - One tool call.
+            - Irrelevant → empty Storages array. NOT refusal.
+            - Look for: connection strings, EF Core/Dapper/SQLAlchemy/TypeORM/GORM/ActiveRecord setup, MongoDB clients, Redis clients (StackExchange.Redis, ioredis), Elasticsearch/OpenSearch clients, S3/Azure Blob/GCS SDK calls, migrations (Flyway, Alembic, EF).
+            - Type lowercase: "postgres","mysql","sqlserver","sqlite","mongodb","redis","elasticsearch","opensearch","s3","azure-blob","gcs","dynamodb","cassandra","other".
+            - Access "owns" if defines schema, runs migrations, or system-of-record. "reads" if query-only. Uncertain → "reads".
+            - Name: DB/bucket/index/logical id. e.g. "billing_db","user-avatars","orders-index". Most specific visible.
+            - ConnectionHint: env var/config key/host snippet if visible. e.g. "ConnectionStrings:BillingDb","DATABASE_URL". Else null. No secret values.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -361,28 +311,24 @@ public static class ExtractionPromptLibrary
         ToolName: "report_conventions",
         ToolDescription: "Report architectural / coding conventions evident in this file (naming, error handling, logging, security, layering).",
         SystemPrompt: """
-            You are a microservices architecture analyzer. Read a single source file
-            and identify architectural or coding conventions evident in it that
-            might be reusable knowledge for the team.
+            Identify architectural/coding conventions clearly visible in file. Output structured.
 
             Rules:
-            - Emit a single tool call with the structured result.
-            - If the file is not relevant, emit an empty Conventions array, NOT a refusal.
-            - Only report conventions that are CLEARLY VISIBLE in this file. Do not
-              speculate about repo-wide standards from a single file.
-            - Examples of valid conventions:
-              * Naming: "Controllers suffixed with 'Controller'", "Async methods end with 'Async'".
-              * Error handling: "All endpoints return ProblemDetails on error".
-              * Logging: "Uses Serilog with structured properties".
-              * Security: "All endpoints require [Authorize] by default".
-              * Layering: "Repository pattern via I<Entity>Repository".
-              * Testing: "xUnit + FluentAssertions".
-              * Config: "Options pattern via IOptions<T>".
-            - Category is a short lowercase tag: "naming", "error-handling",
-              "logging", "security", "layering", "testing", "config", "other".
-            - Name is a 2-6 word title.
-            - Description is one sentence, concrete and specific.
-            - Prefer FEWER, higher-signal conventions over many weak ones.
+            - One tool call.
+            - Irrelevant → empty Conventions array. NOT refusal.
+            - Only CLEARLY VISIBLE conventions. No speculating repo-wide standards from one file.
+            - Examples:
+              * naming: "Controllers suffixed 'Controller'", "Async methods end 'Async'".
+              * error-handling: "All endpoints return ProblemDetails on error".
+              * logging: "Serilog with structured properties".
+              * security: "All endpoints [Authorize] by default".
+              * layering: "Repository pattern via I<Entity>Repository".
+              * testing: "xUnit + FluentAssertions".
+              * config: "Options pattern via IOptions<T>".
+            - Category lowercase tag: "naming","error-handling","logging","security","layering","testing","config","other".
+            - Name: 2-6 word title.
+            - Description: one concrete sentence.
+            - FEWER higher-signal > many weak.
             """,
         UserPromptTemplate: """
             File path: {file_path}
@@ -411,6 +357,169 @@ public static class ExtractionPromptLibrary
                       "Category": { "type": "string" },
                       "Name": { "type": "string" },
                       "Description": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+    // -----------------------------------------------------------------------
+    // ExtractIntegrationContracts
+    //
+    // Cross-repo wiring relies on caller and callee landing on the SAME
+    // deterministic node id. The fields here (HTTP method+path, gRPC
+    // service+method, queue/topic/exchange names) are exactly what gets MD5'd
+    // into the Endpoint/Event/Queue Guid scheme by the projector. Output must
+    // therefore be normalised: uppercase HTTP method, leading slash on path,
+    // no query string, no host. The prompt enforces this in plain English
+    // because we don't post-process the LLM output (yet).
+    // -----------------------------------------------------------------------
+    private static ExtractionPrompt BuildExtractIntegrationContracts() => new(
+        Id: ExtractionPromptId.ExtractIntegrationContracts,
+        Version: CurrentVersion,
+        ToolName: "report_integration_contracts",
+        ToolDescription: "Report the outbound + reciprocal integration surface of this file: HTTP client calls, gRPC client/server impls, async messaging publishes/consumes, and shared internal-package imports.",
+        SystemPrompt: """
+            Extract integration surface for cross-repo wiring. NOT inbound endpoints (other prompt handles). Output structured.
+
+            Capture:
+              1. HTTP CLIENT calls to OTHER services (fetch/axios/HttpClient/requests). Method UPPERCASE (GET/POST). Path MUST start "/", no scheme/host, no query, no fragment.
+              2. gRPC CLIENT calls. Service+Method verbatim from proto ("UserService","GetUser").
+              3. gRPC SERVER impls. Same shape.
+              4. Async PUBLISH sites (RabbitMQ/Kafka/SQS/SNS/ServiceBus/NATS/Redis). Capture "kind"; whichever of exchange/routing_key/topic/queue/message_type present. Names verbatim.
+              5. Async CONSUME sites. Same shape. SignalR server-pushed events too: backend `Clients.X.SendAsync("EventName",...)` → MessagingPublishes kind="signalr" topic="EventName". Frontend `connection.on("EventName",...)` → MessagingConsumes kind="signalr" topic="EventName".
+              6. SharedPackageImports: import statements for internal libs (e.g. "Company.Shared.*", "@org/contracts","myorg-protos"). Skip framework/stdlib.
+              7. SignalRHubMethods: server-side ASP.NET SignalR Hub methods. A class that inherits `Hub` or `Hub<T>` exposes its public methods as RPC entry points. Service=HubClassName, Method=PublicMethodName. One row per public method.
+              8. SignalRClientInvokes: client-side `connection.invoke("X",...)` / `connection.send("X",...)` / `connection.stream("X",...)` (@microsoft/signalr or HubConnection.SendAsync/InvokeAsync C# client). Service=hub-url-tail-or-HubClass (e.g. "GameHub" when known, else last URL segment), Method=invoked method name. Be conservative — only when you can identify the hub.
+
+            Rules:
+            - One tool call.
+            - Empty arrays — NEVER null — for sections with no signal.
+            - Conservative. URL string literal never invoked → omit.
+            - Each call = one item. No file-level dedup.
+            """,
+        UserPromptTemplate: """
+            File path: {file_path}
+
+            File content:
+            ```
+            {file_content}
+            ```
+
+            Extract all outbound HTTP/gRPC calls, gRPC server impls, messaging
+            publishes/consumes, and internal-package imports found in this file.
+            """,
+        OutputJsonSchema: """
+            {
+              "$schema": "https://json-schema.org/draft/2020-12/schema",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "HttpClientCalls", "GrpcClientCalls", "GrpcServerImpls",
+                "MessagingPublishes", "MessagingConsumes", "SharedPackageImports",
+                "SignalRHubMethods", "SignalRClientInvokes"
+              ],
+              "properties": {
+                "HttpClientCalls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Method", "Path"],
+                    "properties": {
+                      "Method": { "type": "string" },
+                      "Path": { "type": "string" },
+                      "BaseUrl": { "type": ["string", "null"] },
+                      "Evidence": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "GrpcClientCalls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Service", "Method"],
+                    "properties": {
+                      "Service": { "type": "string" },
+                      "Method": { "type": "string" },
+                      "Evidence": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "GrpcServerImpls": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Service", "Method"],
+                    "properties": {
+                      "Service": { "type": "string" },
+                      "Method": { "type": "string" },
+                      "Evidence": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "MessagingPublishes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Kind"],
+                    "properties": {
+                      "Kind": { "type": "string" },
+                      "Exchange": { "type": ["string", "null"] },
+                      "RoutingKey": { "type": ["string", "null"] },
+                      "Topic": { "type": ["string", "null"] },
+                      "Queue": { "type": ["string", "null"] },
+                      "MessageType": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "MessagingConsumes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Kind"],
+                    "properties": {
+                      "Kind": { "type": "string" },
+                      "Exchange": { "type": ["string", "null"] },
+                      "RoutingKey": { "type": ["string", "null"] },
+                      "Topic": { "type": ["string", "null"] },
+                      "Queue": { "type": ["string", "null"] },
+                      "MessageType": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "SharedPackageImports": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "SignalRHubMethods": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Service", "Method"],
+                    "properties": {
+                      "Service": { "type": "string" },
+                      "Method": { "type": "string" },
+                      "Evidence": { "type": ["string", "null"] }
+                    }
+                  }
+                },
+                "SignalRClientInvokes": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["Service", "Method"],
+                    "properties": {
+                      "Service": { "type": "string" },
+                      "Method": { "type": "string" },
+                      "Evidence": { "type": ["string", "null"] }
                     }
                   }
                 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, PlusIcon } from "lucide-react";
 import * as React from "react";
 
 import { api } from "@/lib/api";
@@ -93,10 +93,19 @@ export function ApiKeysView({
         <EmptyState onCreate={openCreate} />
       ) : (
         <>
-          <div className="flex items-center justify-end">
-            <Button onClick={openCreate}>Create Key</Button>
+          <div className="flex items-center justify-between animate-fade-up">
+            <p className="text-sm text-muted-foreground">
+              {keys.length} key{keys.length !== 1 ? "s" : ""}
+            </p>
+            <Button onClick={openCreate} className="gap-1.5">
+              <PlusIcon className="size-3.5" />
+              Create key
+            </Button>
           </div>
-          <Card>
+          <Card
+            className="animate-fade-up overflow-hidden"
+            style={{ "--delay": "60ms" } as React.CSSProperties}
+          >
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="border-b border-border bg-muted/30">

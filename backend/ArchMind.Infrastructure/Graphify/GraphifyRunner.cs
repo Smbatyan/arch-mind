@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Json;
 using ArchMind.Core.Abstractions;
 using ArchMind.Core.Exceptions;
-using ArchMind.Infrastructure.Anthropic;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -11,23 +10,20 @@ namespace ArchMind.Infrastructure.Graphify;
 
 /// <summary>
 /// Spawns the Graphify CLI (https://github.com/safishamsi/graphify) as a subprocess
-/// to extract a structural AST graph from a cloned repository. ArchMind layers its
-/// own LLM-based semantic extraction on top, so Graphify's internal LLM enrichment
-/// is explicitly disabled here via flags and environment variables.
+/// to extract a structural AST graph from a cloned repository. Uses graphify's
+/// LLM-free <c>update</c> subcommand — ArchMind's own <c>LlmExtractionJob</c>
+/// layers semantic enrichment on top, so graphify never needs an Anthropic key.
 /// </summary>
 public sealed class GraphifyRunner : IGraphifyRunner
 {
     private readonly GraphifyOptions _options;
-    private readonly AnthropicOptions _anthropic;
     private readonly ILogger<GraphifyRunner> _logger;
 
     public GraphifyRunner(
         IOptions<GraphifyOptions> options,
-        IOptions<AnthropicOptions> anthropicOptions,
         ILogger<GraphifyRunner> logger)
     {
         _options = options.Value;
-        _anthropic = anthropicOptions.Value;
         _logger = logger;
     }
 
@@ -51,19 +47,18 @@ public sealed class GraphifyRunner : IGraphifyRunner
             CreateNoWindow = true,
         };
 
-        // graphify extract <repoPath> --backend claude
-        // `extract` does headless AST + semantic LLM extraction. It requires an LLM
-        // key — there is no skip-LLM flag for this command. We pin --backend claude
-        // since that is always configured. --no-viz / --no-cluster are not valid for
-        // `extract` (they belong to cluster-only / update subcommands).
-        psi.ArgumentList.Add("extract");
+        // graphify update <repoPath> --no-cluster
+        // `update` re-extracts code files via tree-sitter only (no LLM) — per
+        // `graphify --help`: "re-extract code files and update the graph (no LLM
+        // needed)". --no-cluster skips the post-extraction clustering pass since
+        // ArchMind layers its own LlmExtractionJob on top for semantic enrichment
+        // and doesn't consume graphify clusters.
+        psi.ArgumentList.Add("update");
         psi.ArgumentList.Add(repoPath);
-        psi.ArgumentList.Add("--backend");
-        psi.ArgumentList.Add("claude");
+        psi.ArgumentList.Add("--no-cluster");
 
-        // Pass the Anthropic key so graphify can reach the LLM.
-        if (!string.IsNullOrWhiteSpace(_anthropic.ApiKey))
-            psi.EnvironmentVariables["ANTHROPIC_API_KEY"] = _anthropic.ApiKey;
+        // Intentionally NOT passing ANTHROPIC_API_KEY. `update` is structural-only;
+        // semantic extraction is handled separately by ArchMind.Workers.Jobs.LlmExtractionJob.
 
         Process? process;
         try
@@ -186,7 +181,7 @@ public sealed class GraphifyRunner : IGraphifyRunner
     // capitalized keys), extend the lookups in TryGetProp() / ExtractNodes() /
     // ExtractEdges() below. Do NOT silently fail — throw GraphifyOutputMalformedException.
     // =========================================================================
-    private static GraphifyOutput ParseGraphifyOutput(string json, string outputPath)
+    internal static GraphifyOutput ParseGraphifyOutput(string json, string outputPath)
     {
         JsonDocument doc;
         try
@@ -254,12 +249,15 @@ public sealed class GraphifyRunner : IGraphifyRunner
             var name = GetStringProp(n, "name") ?? GetStringProp(n, "title");
             var filePath = GetStringProp(n, "file_path")
                 ?? GetStringProp(n, "filePath")
+                ?? GetStringProp(n, "source_file")
+                ?? GetStringProp(n, "sourceFile")
                 ?? GetStringProp(n, "file")
                 ?? GetStringProp(n, "path");
 
             var props = ExtractPropertyBag(n,
                 excluded: new[] { "id", "_id", "type", "label", "kind", "name", "title",
-                                  "file_path", "filePath", "file", "path" });
+                                  "file_path", "filePath", "source_file", "sourceFile",
+                                  "file", "path" });
 
             result.Add(new GraphifyNode(id, type, name, filePath, props));
         }
@@ -292,13 +290,14 @@ public sealed class GraphifyRunner : IGraphifyRunner
                 ?? GetStringProp(e, "end")
                 ?? throw new GraphifyOutputMalformedException("Graphify edge missing 'target'");
             var type = GetStringProp(e, "type")
+                ?? GetStringProp(e, "relation")
                 ?? GetStringProp(e, "label")
                 ?? GetStringProp(e, "kind")
                 ?? "unknown";
 
             var props = ExtractPropertyBag(e,
                 excluded: new[] { "source", "from", "start", "target", "to", "end",
-                                  "type", "label", "kind" });
+                                  "type", "relation", "label", "kind" });
 
             result.Add(new GraphifyEdge(source, target, type, props));
         }

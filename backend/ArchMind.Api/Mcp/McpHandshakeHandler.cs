@@ -9,9 +9,17 @@ namespace ArchMind.Api.Mcp;
 /// </summary>
 public sealed class McpHandshakeHandler
 {
-    public const string ProtocolVersion = "2025-03-26";
+    public const string ProtocolVersion = "2025-11-25";
     public const string ServerName = "archmind";
     public const string ServerVersion = "0.1.0";
+
+    private static readonly HashSet<string> SupportedProtocolVersions = new(StringComparer.Ordinal)
+    {
+        "2024-11-05",
+        "2025-03-26",
+        "2025-06-18",
+        "2025-11-25",
+    };
 
     private readonly ILogger<McpHandshakeHandler> _logger;
 
@@ -30,13 +38,29 @@ public sealed class McpHandshakeHandler
         switch (request.Method)
         {
             case "initialize":
+                // Echo the client's requested protocolVersion when supported, else
+                // fall back to our preferred. Some MCP clients reject the connection
+                // when the server returns a version older than what they requested.
+                var negotiatedVersion = ProtocolVersion;
+                if (request.Params is JsonElement p &&
+                    p.ValueKind == JsonValueKind.Object &&
+                    p.TryGetProperty("protocolVersion", out var pv) &&
+                    pv.ValueKind == JsonValueKind.String)
+                {
+                    var clientVersion = pv.GetString();
+                    if (!string.IsNullOrEmpty(clientVersion) && SupportedProtocolVersions.Contains(clientVersion))
+                    {
+                        negotiatedVersion = clientVersion;
+                    }
+                }
                 return BuildResponse(request.Id, new
                 {
-                    protocolVersion = ProtocolVersion,
+                    protocolVersion = negotiatedVersion,
                     capabilities = new
                     {
                         resources = new { },
                         tools = new { },
+                        prompts = new { },
                     },
                     serverInfo = new
                     {
@@ -53,12 +77,9 @@ public sealed class McpHandshakeHandler
             case "ping":
                 return BuildResponse(request.Id, new { });
 
-            case "prompts/list":
-                return BuildResponse(request.Id, new { prompts = Array.Empty<object>() });
-
-            // tools/list, tools/call, resources/list and resources/read are
-            // dispatched to dedicated handlers (BE-029 / BE-030) by the
-            // endpoint; they live outside the handshake-scope.
+            // tools/list, tools/call, resources/list, resources/read,
+            // prompts/list and prompts/get are dispatched to dedicated
+            // handlers by the endpoint; they live outside the handshake-scope.
             default:
                 return null;
         }

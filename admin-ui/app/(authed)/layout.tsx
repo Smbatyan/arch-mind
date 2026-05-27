@@ -3,9 +3,7 @@ import { redirect } from "next/navigation";
 
 import { SideNav } from "@/components/side-nav";
 import { TopBar } from "@/components/top-bar";
-
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+import { API_URL } from "@/lib/api";
 
 type MeResponse = { user: { id: string; email: string } };
 
@@ -40,11 +38,13 @@ export default async function AuthedLayout({
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="flex min-h-screen flex-col bg-background">
       <TopBar email={user.email} />
       <div className="flex flex-1 overflow-hidden">
         <SideNav />
-        <main className="flex-1 overflow-auto p-6">{children}</main>
+        <main className="flex-1 overflow-auto">
+          <div className="mx-auto max-w-7xl px-6">{children}</div>
+        </main>
       </div>
     </div>
   );

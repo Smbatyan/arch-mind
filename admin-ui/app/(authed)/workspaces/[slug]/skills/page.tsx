@@ -6,7 +6,9 @@ import type { SkillSummary } from "@/lib/types";
 import { SkillsView } from "./skills-view";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  (typeof window === "undefined" ? process.env.INTERNAL_API_URL : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:5000";
 
 type WorkspaceDetail = {
   id: string;

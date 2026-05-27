@@ -46,24 +46,44 @@ public static class McpBearerAuth
             return AuthResult.Fail(StatusCodes.Status401Unauthorized, "missing workspace slug");
         }
 
-        if (!httpContext.Request.Headers.TryGetValue("Authorization", out var headerValues))
+        // Session-based auth: post-initialize requests carry Mcp-Session-Id instead of Bearer
+        if (httpContext.Request.Headers.TryGetValue("Mcp-Session-Id", out var sessionHeader)
+            && Guid.TryParse(sessionHeader.ToString(), out var parsedSessionId))
         {
-            return AuthResult.Fail(StatusCodes.Status401Unauthorized, "missing Authorization header");
+            var sessionStore = httpContext.RequestServices.GetRequiredService<IMcpSessionStore>();
+            var session = sessionStore.Get(parsedSessionId);
+            if (session is not null)
+            {
+                httpContext.Items[WorkspaceIdKey] = session.WorkspaceId;
+                httpContext.Items[WorkspaceSlugKey] = workspaceSlug;
+                httpContext.Items[ApiKeyIdKey] = session.ApiKeyId;
+                return AuthResult.Ok(session.WorkspaceId, session.ApiKeyId ?? Guid.Empty);
+            }
         }
 
-        var header = headerValues.ToString();
-        const string scheme = "Bearer ";
-        if (!header.StartsWith(scheme, StringComparison.OrdinalIgnoreCase))
+        // Extract API key from either X-Api-Key header (preferred for Claude Code MCP, which
+        // overrides Authorization with its own OAuth JWT) or Authorization: Bearer scheme.
+        string? token = null;
+        if (httpContext.Request.Headers.TryGetValue("X-Api-Key", out var apiKeyHeader))
         {
-            return AuthResult.Fail(
-                StatusCodes.Status401Unauthorized,
-                "Authorization must use the Bearer scheme");
+            token = apiKeyHeader.ToString().Trim();
+        }
+        else if (httpContext.Request.Headers.TryGetValue("Authorization", out var headerValues))
+        {
+            var header = headerValues.ToString();
+            const string scheme = "Bearer ";
+            if (!header.StartsWith(scheme, StringComparison.OrdinalIgnoreCase))
+            {
+                return AuthResult.Fail(
+                    StatusCodes.Status401Unauthorized,
+                    "Authorization must use the Bearer scheme");
+            }
+            token = header.Substring(scheme.Length).Trim();
         }
 
-        var token = header.Substring(scheme.Length).Trim();
         if (string.IsNullOrEmpty(token))
         {
-            return AuthResult.Fail(StatusCodes.Status401Unauthorized, "empty bearer token");
+            return AuthResult.Fail(StatusCodes.Status401Unauthorized, "missing API key (X-Api-Key or Authorization header)");
         }
 
         // Resolve the workspace from the slug first; this lookup is cheap and lets us

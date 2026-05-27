@@ -3,6 +3,8 @@ using System.Text.Json;
 using ArchMind.Core.Abstractions;
 using ArchMind.Core.Models.Graph;
 using Dapper;
+using Npgsql;
+using NpgsqlTypes;
 
 namespace ArchMind.Infrastructure.Graph;
 
@@ -444,15 +446,30 @@ internal sealed class GraphReader : IGraphReader
 
         if (!string.IsNullOrWhiteSpace(serviceName))
         {
+            // Accept fragmented service identity:
+            //  - exact name match
+            //  - dotted-namespace parent OR child match. Per-file LLM
+            //    IdentifyService inconsistently tags the same code under
+            //    "BazarBelot" vs "BazarBelot.Api" etc., so the Service
+            //    vertex set ends up split. We compute the dotted boundary
+            //    strings in C# and pass them as parameters because AGE's
+            //    Cypher string-concat operator handling is patchy across
+            //    versions. DISTINCT collapses Endpoint nodes that several
+            //    aliased Services happen to point at via deterministic GUID.
+            var nameDot = serviceName + ".";
             cypher = $$"""
-                MATCH (s:Service {workspace_id: $ws, name: $name})-[:EXPOSES]->(e:Endpoint {workspace_id: $ws})
-                WHERE true{{methodFilter}}
-                RETURN e
+                MATCH (s:Service {workspace_id: $ws})-[:EXPOSES]->(e:Endpoint {workspace_id: $ws})
+                WHERE (
+                    s.name = $name
+                    OR s.name STARTS WITH $nameDot
+                    OR $name STARTS WITH s.name
+                ){{methodFilter}}
+                RETURN DISTINCT e
                 ORDER BY e.path, e.method
             """;
             parameters = method is null
-                ? new { ws = workspaceId, name = serviceName }
-                : (object)new { ws = workspaceId, name = serviceName, method };
+                ? new { ws = workspaceId, name = serviceName, nameDot }
+                : (object)new { ws = workspaceId, name = serviceName, nameDot, method };
         }
         else
         {
@@ -610,11 +627,19 @@ internal sealed class GraphReader : IGraphReader
         var sql = BuildCypherSql(cypher, new[] { columnAlias });
         var jsonParams = BuildJsonParams(parameters);
 
-        var rows = await conn.QueryAsync<string?>(
-            new CommandDefinition(sql, new { @params = jsonParams }, cancellationToken: ct))
-            .ConfigureAwait(false);
+        await using var cmd = (NpgsqlCommand)conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.AllResultTypesAreUnknown = true;
+        cmd.Parameters.Add(new NpgsqlParameter { Value = jsonParams, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown });
 
-        return rows.Where(r => r is not null).Cast<string>().ToList();
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        var rows = new List<string>();
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            if (!await reader.IsDBNullAsync(0, ct).ConfigureAwait(false))
+                rows.Add(reader.GetString(0));
+        }
+        return rows;
     }
 
     /// <summary>
@@ -626,9 +651,14 @@ internal sealed class GraphReader : IGraphReader
         var sql = BuildCypherSql(cypher, new[] { columnAlias });
         var jsonParams = BuildJsonParams(parameters);
 
-        return await conn.QuerySingleOrDefaultAsync<string?>(
-            new CommandDefinition(sql, new { @params = jsonParams }, cancellationToken: ct))
-            .ConfigureAwait(false);
+        await using var cmd = (NpgsqlCommand)conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.AllResultTypesAreUnknown = true;
+        cmd.Parameters.Add(new NpgsqlParameter { Value = jsonParams, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown });
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+        return await reader.IsDBNullAsync(0, ct).ConfigureAwait(false) ? null : reader.GetString(0);
     }
 
     /// <summary>
@@ -642,12 +672,10 @@ internal sealed class GraphReader : IGraphReader
         var sql = BuildCypherSql(cypher, columnAliases);
         var jsonParams = BuildJsonParams(parameters);
 
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = (NpgsqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
-        var p = cmd.CreateParameter();
-        p.ParameterName = "params";
-        p.Value = jsonParams;
-        cmd.Parameters.Add(p);
+        cmd.AllResultTypesAreUnknown = true;
+        cmd.Parameters.Add(new NpgsqlParameter { Value = jsonParams, NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Unknown });
 
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
         var rows = new List<string?[]>();
@@ -658,7 +686,7 @@ internal sealed class GraphReader : IGraphReader
             {
                 arr[i] = await reader.IsDBNullAsync(i, ct).ConfigureAwait(false)
                     ? null
-                    : reader.GetValue(i)?.ToString();
+                    : reader.GetString(i);
             }
             rows.Add(arr);
         }
@@ -671,8 +699,13 @@ internal sealed class GraphReader : IGraphReader
     /// </summary>
     private static string BuildCypherSql(string cypher, IReadOnlyList<string> columnAliases)
     {
-        var columns = string.Join(", ", columnAliases.Select(a => $"{a} agtype"));
-        return $"SELECT * FROM cypher('{GraphName}', $${cypher}$$, @params) AS ({columns});";
+        // No ::text cast — agtype_value_to_text fails on vertex/edge agtypes.
+        // We read raw bytes via NpgsqlCommand.AllResultTypesAreUnknown = true,
+        // which forces every column to come back as its Postgres text wire
+        // representation (i.e. the literal agtype text, including ::vertex /
+        // ::edge suffixes). AgtypeParser handles those suffixes.
+        var colDefs = string.Join(", ", columnAliases.Select(a => $"{a} agtype"));
+        return $"SELECT * FROM cypher('{GraphName}', $${cypher}$$, $1) AS ({colDefs});";
     }
 
     /// <summary>
@@ -800,9 +833,11 @@ internal sealed class GraphReader : IGraphReader
     private static Guid? ParseGuidScalar(string? raw)
     {
         if (raw is null) return null;
+        // agtype::text strips quotes from string scalars → try bare Guid first.
+        if (Guid.TryParse(raw, out var g)) return g;
         using var doc = AgtypeParser.Parse(raw);
         if (doc is null) return null;
-        return AgtypeParser.TryGetGuid(doc.RootElement, out var g) ? g : null;
+        return AgtypeParser.TryGetGuid(doc.RootElement, out g) ? g : null;
     }
 
     private static int? ParseIntScalar(string? raw)
@@ -831,6 +866,9 @@ internal sealed class GraphReader : IGraphReader
     private static string? UnquoteAgtypeString(string? raw)
     {
         if (raw is null) return null;
+        // agtype::text strips quotes from string scalars → bare value is already unquoted.
+        if (raw.Length == 0 || (raw[0] != '"' && raw[0] != '{' && raw[0] != '['))
+            return raw;
         using var doc = AgtypeParser.Parse(raw);
         if (doc is null) return null;
         return doc.RootElement.ValueKind == JsonValueKind.String
@@ -847,6 +885,72 @@ internal sealed class GraphReader : IGraphReader
             string s when Guid.TryParse(s, out var parsed) => parsed,
             _ => null,
         };
+    }
+
+    public async Task<VisualizationData> GetVisualizationDataAsync(
+        Guid workspaceId, int nodeLimit = 500, CancellationToken ct = default)
+    {
+        EnsureScoped(workspaceId);
+        if (nodeLimit <= 0) nodeLimit = 500;
+        if (nodeLimit > 2000) nodeLimit = 2000;
+        var edgeLimit = nodeLimit * 3;
+
+        await using var conn = await _factory.OpenAsync(ct).ConfigureAwait(false);
+
+        var nodes = new List<VisualizationNode>(nodeLimit);
+        var nodeIdSet = new HashSet<Guid>(nodeLimit);
+
+        foreach (var label in GraphLabels.Vertex)
+        {
+            if (nodes.Count >= nodeLimit) break;
+            var remaining = nodeLimit - nodes.Count;
+
+            var cypher = $$"""
+                MATCH (n:{{label}} {workspace_id: $ws})
+                RETURN n.id AS id, n.name AS name, n.repo_id AS repo_id
+                LIMIT {{remaining}}
+            """;
+
+            var rows = await QueryMultiColumnAsync(conn, cypher, new { ws = workspaceId },
+                new[] { "id", "name", "repo_id" }, ct).ConfigureAwait(false);
+
+            foreach (var row in rows)
+            {
+                var id = ParseGuidScalar(row[0]);
+                if (id is null || !nodeIdSet.Add(id.Value)) continue;
+                var repoId = ParseGuidScalar(row[2]);
+                nodes.Add(new VisualizationNode(id.Value, label, UnquoteAgtypeString(row[1]), repoId));
+            }
+        }
+
+        var edges = new List<VisualizationEdge>(Math.Min(edgeLimit, 256));
+
+        foreach (var edgeLabel in GraphLabels.Edge)
+        {
+            if (edges.Count >= edgeLimit) break;
+            var remaining = edgeLimit - edges.Count;
+
+            var cypher = $$"""
+                MATCH (a)-[r:{{edgeLabel}}]->(b)
+                WHERE a.workspace_id = $ws AND b.workspace_id = $ws
+                RETURN a.id AS src, b.id AS tgt
+                LIMIT {{remaining}}
+            """;
+
+            var rows = await QueryMultiColumnAsync(conn, cypher, new { ws = workspaceId },
+                new[] { "src", "tgt" }, ct).ConfigureAwait(false);
+
+            foreach (var row in rows)
+            {
+                var src = ParseGuidScalar(row[0]);
+                var tgt = ParseGuidScalar(row[1]);
+                if (src is null || tgt is null) continue;
+                if (!nodeIdSet.Contains(src.Value) || !nodeIdSet.Contains(tgt.Value)) continue;
+                edges.Add(new VisualizationEdge(src.Value, tgt.Value, edgeLabel));
+            }
+        }
+
+        return new VisualizationData(nodes, edges, nodes.Count >= nodeLimit);
     }
 
     // BE-046: cheap availability probe. Returns true if AGE is loaded and the

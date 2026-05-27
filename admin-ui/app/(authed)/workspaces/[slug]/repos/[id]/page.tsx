@@ -4,7 +4,9 @@ import { redirect } from "next/navigation";
 import { RepoDetailView, type RepoDetail, type ScanRun } from "./repo-detail-view";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  (typeof window === "undefined" ? process.env.INTERNAL_API_URL : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:5000";
 
 async function buildCookieHeaders(): Promise<HeadersInit> {
   const cookieStore = await cookies();

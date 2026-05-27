@@ -50,6 +50,7 @@ public static class McpEndpoints
         McpHandshakeHandler handshakeHandler,
         McpToolsHandler toolsHandler,
         McpResourcesHandler resourcesHandler,
+        McpPromptsHandler promptsHandler,
         IGraphReader graphReader,
         IFileExtractionRepository fileExtractions,
         GetRelevantContextHandler relevantContext,
@@ -112,7 +113,7 @@ public static class McpEndpoints
         Guid? sessionId = TryReadSessionId(httpContext);
         if (request.Method == "initialize")
         {
-            var session = sessionStore.Create(auth.WorkspaceId);
+            var session = sessionStore.Create(auth.WorkspaceId, auth.ApiKeyId);
             sessionId = session.Id;
             httpContext.Response.Headers["Mcp-Session-Id"] = session.Id.ToString();
         }
@@ -135,6 +136,7 @@ public static class McpEndpoints
             // Still let the handler observe it (e.g. initialized).
             handshakeHandler.TryHandle(request, auth.WorkspaceId, sessionId);
             httpContext.Response.StatusCode = StatusCodes.Status202Accepted;
+            httpContext.Response.Headers["Connection"] = "close";
             RecordTelemetry(
                 telemetryRecorder, logger, auth.WorkspaceId, auth.ApiKeyId,
                 method: request.Method, statusCode: StatusCodes.Status202Accepted,
@@ -171,6 +173,14 @@ public static class McpEndpoints
                     response = await resourcesHandler.HandleReadAsync(
                         request, auth.WorkspaceId, workspaceSlug, graphReader, db, ct);
                     break;
+                case "prompts/list":
+                    response = await promptsHandler.HandleListAsync(
+                        request, auth.WorkspaceId, db, ct);
+                    break;
+                case "prompts/get":
+                    response = await promptsHandler.HandleGetAsync(
+                        request, auth.WorkspaceId, db, ct);
+                    break;
                 default:
                     response = new McpResponse(
                         JsonRpc: "2.0",
@@ -187,6 +197,13 @@ public static class McpEndpoints
         var (responseBytes, responseSize) = SerializeResponse(response);
         httpContext.Response.StatusCode = StatusCodes.Status200OK;
         httpContext.Response.ContentType = "application/json; charset=utf-8";
+        httpContext.Response.ContentLength = responseBytes.Length;
+        // Force a fresh TCP connection for each request. Claude Code's HTTP MCP
+        // transport pipelines multiple requests on the same connection, but the
+        // current handler does not interoperate with that — the second request
+        // on a keep-alive connection hangs. Until the underlying cause is fixed,
+        // signaling close keeps every client compatible.
+        httpContext.Response.Headers["Connection"] = "close";
         await httpContext.Response.Body.WriteAsync(responseBytes, ct);
 
         var status = response.Error is null ? StatusCodes.Status200OK : MapJsonRpcErrorToHttp(response.Error.Code);

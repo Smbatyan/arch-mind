@@ -2,6 +2,7 @@
 
 import {
   AlertCircleIcon,
+  ArrowUpRightIcon,
   BoxIcon,
   CircleDollarSignIcon,
   FilesIcon,
@@ -9,6 +10,7 @@ import {
   MessageCircleQuestionIcon,
   NetworkIcon,
   PlusIcon,
+  TrendingUpIcon,
 } from "lucide-react";
 import Link from "next/link";
 import * as React from "react";
@@ -52,9 +54,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-// ---------------------------------------------------------------------------
-// Formatters
-// ---------------------------------------------------------------------------
+// ── Formatters ───────────────────────────────────────────────────────
 
 function formatRelative(value: string | null): string {
   if (!value) return "never";
@@ -99,7 +99,6 @@ function formatNumber(n: number): string {
 }
 
 function formatDayShort(iso: string): string {
-  // ISO date "YYYY-MM-DD"
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
@@ -107,14 +106,22 @@ function formatDayShort(iso: string): string {
 
 function repoName(url: string | null | undefined): string {
   if (!url) return "—";
-  // strip protocol/host, drop trailing .git
   const cleaned = url.replace(/^https?:\/\/[^/]+\//, "").replace(/\.git$/, "");
   return cleaned || url;
 }
 
-// ---------------------------------------------------------------------------
-// View
-// ---------------------------------------------------------------------------
+// ── Chart tooltip style ──────────────────────────────────────────────
+
+const TOOLTIP_STYLE: React.CSSProperties = {
+  background: "oklch(0.205 0.014 275)",
+  border: "1px solid oklch(0.290 0.018 275)",
+  borderRadius: "8px",
+  fontSize: 12,
+  color: "oklch(0.965 0.006 264)",
+  boxShadow: "0 8px 32px oklch(0 0 0 / 0.5)",
+};
+
+// ── View ─────────────────────────────────────────────────────────────
 
 export function DashboardView({
   slug,
@@ -133,15 +140,17 @@ export function DashboardView({
 
   return (
     <div className="flex flex-col gap-6">
-      {hasNoRepos ? <EmptyDashboardCard slug={slug} /> : null}
+      {hasNoRepos && <EmptyDashboardCard slug={slug} />}
 
-      {/* KPI grid */}
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3">
+      {/* KPI bento grid */}
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <KpiCard
-          title="Repos"
+          title="Repositories"
           value={summary.repos.total}
           subtext={`${summary.repos.active} active · Last scan: ${formatRelative(summary.repos.lastScanAt)}`}
           icon={<BoxIcon className="size-4" />}
+          color="violet"
+          delay={0}
         />
         <KpiCard
           title="Graph nodes"
@@ -155,39 +164,51 @@ export function DashboardView({
               : `${summary.graph.totalEdges} edges`
           }
           icon={<NetworkIcon className="size-4" />}
+          color="indigo"
+          delay={60}
         />
         <KpiCard
           title="Files extracted"
           value={summary.extractions.totalFiles}
-          subtext={`${summary.extractions.cachedPct.toFixed(0)}% cache hits`}
+          subtext={`${summary.extractions.cachedPct.toFixed(0)}% cache hit rate`}
           icon={<FilesIcon className="size-4" />}
+          color="sky"
+          delay={120}
         />
         <KpiCard
           title="Open clarifications"
           value={summary.clarifications.open}
           subtext={`${summary.clarifications.answered} resolved`}
           icon={<MessageCircleQuestionIcon className="size-4" />}
-          accent={summary.clarifications.open > 0 ? "destructive" : undefined}
+          color={summary.clarifications.open > 0 ? "rose" : "emerald"}
+          accent={summary.clarifications.open > 0 ? "attention" : undefined}
+          delay={180}
         />
         <KpiCard
           title="LLM spend (30d)"
           value={formatUsd(summary.llmSpend.totalUsd)}
           subtext={`${formatNumber(summary.llmSpend.totalCalls)} calls · ${summary.llmSpend.cacheHitPct.toFixed(0)}% cached`}
           icon={<CircleDollarSignIcon className="size-4" />}
+          color="amber"
+          delay={240}
         />
         <KpiCard
           title="MCP calls (7d)"
           value={summary.mcpActivity.totalCalls}
           subtext={`p95 ${summary.mcpActivity.p95LatencyMs}ms · ${summary.mcpActivity.errorRatePct.toFixed(1)}% errors`}
           icon={<GitBranchIcon className="size-4" />}
+          color="teal"
+          delay={300}
         />
       </div>
 
-      {/* Charts + activity feed */}
+      {/* Charts + activity */}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-        <div className="grid grid-cols-1 gap-4 lg:col-span-2 xl:grid-cols-2">
-          <LlmSpendChart data={llmSpend} />
-          <McpActivityChart data={mcpActivity} />
+        <div className="flex flex-col gap-4 lg:col-span-2">
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <LlmSpendChart data={llmSpend} />
+            <McpActivityChart data={mcpActivity} />
+          </div>
         </div>
         <div className="lg:col-span-1">
           <ActivityFeed slug={slug} />
@@ -200,53 +221,114 @@ export function DashboardView({
   );
 }
 
-// ---------------------------------------------------------------------------
-// KPI card
-// ---------------------------------------------------------------------------
+// ── KPI Card ─────────────────────────────────────────────────────────
+
+type KpiColor = "violet" | "indigo" | "sky" | "emerald" | "rose" | "amber" | "teal";
+
+const COLOR_MAP: Record<KpiColor, { icon: string; bg: string; border: string }> = {
+  violet: {
+    icon: "text-violet-400",
+    bg: "bg-violet-500/10",
+    border: "hover:border-violet-500/30",
+  },
+  indigo: {
+    icon: "text-indigo-400",
+    bg: "bg-indigo-500/10",
+    border: "hover:border-indigo-500/30",
+  },
+  sky: {
+    icon: "text-sky-400",
+    bg: "bg-sky-500/10",
+    border: "hover:border-sky-500/30",
+  },
+  emerald: {
+    icon: "text-emerald-400",
+    bg: "bg-emerald-500/10",
+    border: "hover:border-emerald-500/30",
+  },
+  rose: {
+    icon: "text-rose-400",
+    bg: "bg-rose-500/10",
+    border: "hover:border-rose-500/30",
+  },
+  amber: {
+    icon: "text-amber-400",
+    bg: "bg-amber-500/10",
+    border: "hover:border-amber-500/30",
+  },
+  teal: {
+    icon: "text-teal-400",
+    bg: "bg-teal-500/10",
+    border: "hover:border-teal-500/30",
+  },
+};
 
 function KpiCard({
   title,
   value,
   subtext,
   icon,
+  color,
   accent,
+  delay,
 }: {
   title: string;
   value: number | string;
   subtext: string;
   icon: React.ReactNode;
-  accent?: "destructive";
+  color: KpiColor;
+  accent?: string;
+  delay: number;
 }) {
-  const displayValue =
-    typeof value === "number" ? formatNumber(value) : value;
+  const displayValue = typeof value === "number" ? formatNumber(value) : value;
+  const c = COLOR_MAP[color];
+
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-start justify-between gap-2 pb-1">
-        <CardTitle className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          {title}
-        </CardTitle>
-        <span className="text-muted-foreground">{icon}</span>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-1 px-4">
-        <div className="flex items-baseline gap-2">
-          <span className="font-heading text-2xl font-semibold tabular-nums">
-            {displayValue}
-          </span>
-          {accent === "destructive" &&
-          typeof value === "number" &&
-          value > 0 ? (
-            <Badge variant="destructive">attention</Badge>
-          ) : null}
+    <div
+      className={`animate-fade-up relative overflow-hidden rounded-xl border border-border bg-card p-4 transition-all duration-200 ${c.border}`}
+      style={{ "--delay": `${delay}ms` } as React.CSSProperties}
+    >
+      {/* Subtle gradient top stripe */}
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-60"
+        style={{
+          background:
+            color === "violet"
+              ? "linear-gradient(90deg, transparent, oklch(0.63 0.245 295), transparent)"
+              : color === "indigo"
+              ? "linear-gradient(90deg, transparent, oklch(0.59 0.200 265), transparent)"
+              : color === "rose"
+              ? "linear-gradient(90deg, transparent, oklch(0.64 0.220 015), transparent)"
+              : "linear-gradient(90deg, transparent, oklch(0.66 0.180 155), transparent)",
+        }}
+        aria-hidden
+      />
+
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex flex-col gap-1.5">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            {title}
+          </p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold tabular-nums tracking-tight">
+              {displayValue}
+            </span>
+            {accent === "attention" && (
+              <Badge variant="destructive" className="text-[10px] px-1.5 py-0">
+                needs attention
+              </Badge>
+            )}
+          </div>
+          <p className="text-xs text-muted-foreground leading-relaxed">{subtext}</p>
         </div>
-        <p className="text-xs text-muted-foreground">{subtext}</p>
-      </CardContent>
-    </Card>
+
+        <div className={`rounded-lg p-2 ${c.bg} ${c.icon} shrink-0`}>{icon}</div>
+      </div>
+    </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Charts
-// ---------------------------------------------------------------------------
+// ── Charts ───────────────────────────────────────────────────────────
 
 function LlmSpendChart({ data }: { data: DailyLlmSpend[] }) {
   const chartData = data.map((d) => ({
@@ -256,57 +338,54 @@ function LlmSpendChart({ data }: { data: DailyLlmSpend[] }) {
   }));
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">LLM spend (last 30 days)</CardTitle>
-        <CardDescription>Daily cost in USD</CardDescription>
+    <Card className="animate-fade-up" style={{ "--delay": "360ms" } as React.CSSProperties}>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-sm font-medium">LLM Spend</CardTitle>
+            <CardDescription className="text-xs">Last 30 days · USD</CardDescription>
+          </div>
+          <TrendingUpIcon className="size-4 text-muted-foreground/50" />
+        </div>
       </CardHeader>
-      <CardContent className="px-2 pb-2">
+      <CardContent className="px-2 pb-3">
         {chartData.length === 0 ? (
           <EmptyChart label="No spend recorded yet" />
         ) : (
-          <ResponsiveContainer width="100%" height={200}>
-            <BarChart
-              data={chartData}
-              margin={{ top: 4, right: 8, bottom: 0, left: -8 }}
-            >
+          <ResponsiveContainer width="100%" height={180}>
+            <BarChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -16 }}>
+              <defs>
+                <linearGradient id="spendGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="oklch(0.63 0.245 295)" stopOpacity={0.9} />
+                  <stop offset="100%" stopColor="oklch(0.59 0.200 265)" stopOpacity={0.6} />
+                </linearGradient>
+              </defs>
               <CartesianGrid
                 strokeDasharray="3 3"
-                stroke="var(--border)"
+                stroke="oklch(0.290 0.018 275)"
                 vertical={false}
               />
               <XAxis
                 dataKey="day"
-                stroke="var(--muted-foreground)"
+                stroke="oklch(0.660 0.018 264)"
                 fontSize={10}
                 tickLine={false}
                 axisLine={false}
                 interval="preserveStartEnd"
               />
               <YAxis
-                stroke="var(--muted-foreground)"
+                stroke="oklch(0.660 0.018 264)"
                 fontSize={10}
                 tickLine={false}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
               <Tooltip
-                contentStyle={{
-                  background: "var(--popover)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-md)",
-                  fontSize: 12,
-                }}
-                formatter={(v) => [
-                  `$${Number(v ?? 0).toFixed(2)}`,
-                  "Cost",
-                ]}
+                contentStyle={TOOLTIP_STYLE}
+                formatter={(v) => [`$${Number(v ?? 0).toFixed(2)}`, "Cost"]}
+                cursor={{ fill: "oklch(1 0 0 / 0.04)" }}
               />
-              <Bar
-                dataKey="cost"
-                fill="var(--chart-2)"
-                radius={[2, 2, 0, 0]}
-              />
+              <Bar dataKey="cost" fill="url(#spendGrad)" radius={[3, 3, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         )}
@@ -323,60 +402,66 @@ function McpActivityChart({ data }: { data: DailyMcpActivity[] }) {
   }));
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">MCP calls (last 7 days)</CardTitle>
-        <CardDescription>Calls and errors per day</CardDescription>
+    <Card className="animate-fade-up" style={{ "--delay": "420ms" } as React.CSSProperties}>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-sm font-medium">MCP Activity</CardTitle>
+            <CardDescription className="text-xs">Last 7 days · calls & errors</CardDescription>
+          </div>
+          <GitBranchIcon className="size-4 text-muted-foreground/50" />
+        </div>
       </CardHeader>
-      <CardContent className="px-2 pb-2">
+      <CardContent className="px-2 pb-3">
         {chartData.length === 0 ? (
           <EmptyChart label="No MCP activity yet" />
         ) : (
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart
-              data={chartData}
-              margin={{ top: 4, right: 8, bottom: 0, left: -8 }}
-            >
+          <ResponsiveContainer width="100%" height={180}>
+            <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -16 }}>
+              <defs>
+                <linearGradient id="callsGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="oklch(0.59 0.200 265)" stopOpacity={0.4} />
+                  <stop offset="100%" stopColor="oklch(0.59 0.200 265)" stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
               <CartesianGrid
                 strokeDasharray="3 3"
-                stroke="var(--border)"
+                stroke="oklch(0.290 0.018 275)"
                 vertical={false}
               />
               <XAxis
                 dataKey="day"
-                stroke="var(--muted-foreground)"
+                stroke="oklch(0.660 0.018 264)"
                 fontSize={10}
                 tickLine={false}
                 axisLine={false}
               />
               <YAxis
-                stroke="var(--muted-foreground)"
+                stroke="oklch(0.660 0.018 264)"
                 fontSize={10}
                 tickLine={false}
                 axisLine={false}
               />
               <Tooltip
-                contentStyle={{
-                  background: "var(--popover)",
-                  border: "1px solid var(--border)",
-                  borderRadius: "var(--radius-md)",
-                  fontSize: 12,
-                }}
+                contentStyle={TOOLTIP_STYLE}
+                cursor={{ stroke: "oklch(0.63 0.245 295 / 0.3)", strokeWidth: 1 }}
               />
               <Area
                 type="monotone"
                 dataKey="calls"
-                stroke="var(--chart-2)"
-                fill="var(--chart-2)"
-                fillOpacity={0.2}
+                stroke="oklch(0.59 0.200 265)"
+                fill="url(#callsGrad)"
                 strokeWidth={2}
+                dot={false}
+                activeDot={{ r: 3, fill: "oklch(0.59 0.200 265)" }}
               />
               <Line
                 type="monotone"
                 dataKey="errors"
-                stroke="var(--destructive)"
-                strokeWidth={2}
+                stroke="oklch(0.64 0.220 015)"
+                strokeWidth={1.5}
                 dot={false}
+                strokeDasharray="4 2"
               />
             </AreaChart>
           </ResponsiveContainer>
@@ -388,15 +473,13 @@ function McpActivityChart({ data }: { data: DailyMcpActivity[] }) {
 
 function EmptyChart({ label }: { label: string }) {
   return (
-    <div className="flex h-[200px] items-center justify-center text-xs text-muted-foreground">
+    <div className="flex h-[180px] items-center justify-center text-xs text-muted-foreground/60">
       {label}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Recent scans table + detail drawer
-// ---------------------------------------------------------------------------
+// ── Recent Scans Table ───────────────────────────────────────────────
 
 function statusBadgeVariant(
   status: ScanSummary["status"] | string
@@ -440,7 +523,6 @@ function RecentScansTable({
     api<Record<string, unknown>>(`/api/workspaces/${slug}/report/scans/${openScanId}`)
       .then((raw) => {
         if (!cancelled) {
-          // Normalize backend field names → frontend ScanDetail shape
           const finishedAt =
             (raw.finishedAt as string | null) ??
             (raw.completedAt as string | null) ??
@@ -451,8 +533,7 @@ function RecentScansTable({
             (startedAt && finishedAt
               ? Math.max(
                   0,
-                  new Date(finishedAt).getTime() -
-                    new Date(startedAt).getTime()
+                  new Date(finishedAt).getTime() - new Date(startedAt).getTime()
                 )
               : null);
           const normalized: ScanDetail = {
@@ -493,27 +574,55 @@ function RecentScansTable({
   }, [openScanId, slug]);
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">Recent scans</CardTitle>
-        <CardDescription>Latest 10 scan runs</CardDescription>
+    <Card
+      className="animate-fade-up overflow-hidden"
+      style={{ "--delay": "480ms" } as React.CSSProperties}
+    >
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="text-sm font-medium">Recent Scans</CardTitle>
+            <CardDescription className="text-xs">Latest 10 scan runs</CardDescription>
+          </div>
+          {scans.length > 0 && (
+            <Link
+              href={`/workspaces/${slug}/repos`}
+              className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
+            >
+              View repos
+              <ArrowUpRightIcon className="size-3" />
+            </Link>
+          )}
+        </div>
       </CardHeader>
       <CardContent className="p-0">
         {scans.length === 0 ? (
-          <div className="px-4 py-8 text-center text-sm text-muted-foreground">
+          <div className="px-6 py-10 text-center text-sm text-muted-foreground">
             No scans yet. Add a repo and trigger a scan.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b text-left text-xs text-muted-foreground">
-                  <th className="px-4 py-3 font-medium">Repo</th>
-                  <th className="px-4 py-3 font-medium">Started</th>
-                  <th className="px-4 py-3 font-medium">Duration</th>
-                  <th className="px-4 py-3 font-medium">Files</th>
-                  <th className="px-4 py-3 font-medium">Cost</th>
-                  <th className="px-4 py-3 font-medium">Status</th>
+                <tr className="border-b border-border/60 text-left">
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Repository
+                  </th>
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Started
+                  </th>
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Duration
+                  </th>
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Files
+                  </th>
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Cost
+                  </th>
+                  <th className="px-4 py-2.5 text-xs font-medium text-muted-foreground">
+                    Status
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -521,25 +630,28 @@ function RecentScansTable({
                   <tr
                     key={scan.id}
                     onClick={() => setOpenScanId(scan.id)}
-                    className="cursor-pointer border-b last:border-0 hover:bg-muted/40"
+                    className="cursor-pointer border-b border-border/40 last:border-0 transition-colors hover:bg-muted/30"
                   >
-                    <td className="px-4 py-3 font-mono text-xs">
+                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
                       {repoName(scan.repoUrl)}
                     </td>
-                    <td className="px-4 py-3 text-muted-foreground">
+                    <td className="px-4 py-3 text-xs text-muted-foreground">
                       {formatRelative(scan.startedAt)}
                     </td>
-                    <td className="px-4 py-3 tabular-nums">
+                    <td className="px-4 py-3 text-xs tabular-nums">
                       {formatDuration(scan.durationMs)}
                     </td>
-                    <td className="px-4 py-3 tabular-nums">
+                    <td className="px-4 py-3 text-xs tabular-nums">
                       {scan.fileCount.toLocaleString()}
                     </td>
-                    <td className="px-4 py-3 tabular-nums">
+                    <td className="px-4 py-3 text-xs tabular-nums">
                       {formatUsd(scan.costUsd)}
                     </td>
                     <td className="px-4 py-3">
-                      <Badge variant={statusBadgeVariant(scan.status)}>
+                      <Badge
+                        variant={statusBadgeVariant(scan.status)}
+                        className="text-[10px] px-1.5 py-0"
+                      >
                         {scan.status.toLowerCase()}
                       </Badge>
                     </td>
@@ -551,13 +663,14 @@ function RecentScansTable({
         )}
       </CardContent>
 
+      {/* Scan detail dialog */}
       <Dialog
         open={openScanId !== null}
         onOpenChange={(o) => !o && setOpenScanId(null)}
       >
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Scan detail</DialogTitle>
+            <DialogTitle>Scan details</DialogTitle>
             <DialogDescription>
               {detail
                 ? `${repoName(detail.repoUrl)} · ${formatRelative(detail.startedAt)}`
@@ -565,13 +678,24 @@ function RecentScansTable({
             </DialogDescription>
           </DialogHeader>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <div className="space-y-2 py-2">
+              {[...Array(5)].map((_, i) => (
+                <div
+                  key={i}
+                  className="h-8 rounded-md bg-muted/40 animate-pulse"
+                  style={{ animationDelay: `${i * 60}ms` }}
+                />
+              ))}
+            </div>
           ) : error ? (
             <p className="text-sm text-destructive">{error}</p>
           ) : detail ? (
-            <div className="flex flex-col gap-3 text-sm">
+            <div className="flex flex-col gap-0 divide-y divide-border/60 text-sm">
               <DetailRow label="Status">
-                <Badge variant={statusBadgeVariant(detail.status)}>
+                <Badge
+                  variant={statusBadgeVariant(detail.status)}
+                  className="text-[11px]"
+                >
                   {detail.status.toLowerCase()}
                 </Badge>
               </DetailRow>
@@ -581,44 +705,49 @@ function RecentScansTable({
                 </span>
               </DetailRow>
               <DetailRow label="Commit">
-                <span className="font-mono text-xs">
+                <span className="font-mono text-xs text-muted-foreground">
                   {detail.commitSha ? detail.commitSha.slice(0, 12) : "—"}
                 </span>
               </DetailRow>
-              <DetailRow label="Duration">
-                {formatDuration(detail.durationMs)}
-              </DetailRow>
+              <DetailRow label="Duration">{formatDuration(detail.durationMs)}</DetailRow>
               <DetailRow label="Files">
-                {detail.fileCount.toLocaleString()} (
-                {detail.cachedFiles.toLocaleString()} cached)
+                {detail.fileCount.toLocaleString()}{" "}
+                <span className="text-muted-foreground">
+                  ({detail.cachedFiles.toLocaleString()} cached)
+                </span>
               </DetailRow>
               <DetailRow label="Graph delta">
-                +{detail.nodesAdded.toLocaleString()} nodes · +
-                {detail.edgesAdded.toLocaleString()} edges
+                <span className="text-emerald-400">
+                  +{detail.nodesAdded.toLocaleString()} nodes
+                </span>{" "}
+                ·{" "}
+                <span className="text-sky-400">
+                  +{detail.edgesAdded.toLocaleString()} edges
+                </span>
               </DetailRow>
               <DetailRow label="Cost">{formatUsd(detail.costUsd)}</DetailRow>
-              {detail.errorMessage ? (
-                <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-                  {detail.errorMessage}
-                </div>
-              ) : null}
-              {detail.logs ? (
-                <details className="rounded-md border border-border bg-muted/40">
-                  <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
-                    Logs
-                  </summary>
-                  <pre className="max-h-64 overflow-auto px-3 pb-3 font-mono text-[11px] leading-tight whitespace-pre-wrap">
-                    {detail.logs}
-                  </pre>
-                </details>
-              ) : null}
             </div>
           ) : null}
+
+          {detail?.errorMessage && (
+            <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+              {detail.errorMessage}
+            </div>
+          )}
+
+          {detail?.logs && (
+            <details className="rounded-lg border border-border bg-muted/20">
+              <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground hover:text-foreground">
+                Logs
+              </summary>
+              <pre className="max-h-64 overflow-auto px-3 pb-3 font-mono text-[11px] leading-relaxed text-muted-foreground whitespace-pre-wrap">
+                {detail.logs}
+              </pre>
+            </details>
+          )}
+
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setOpenScanId(null)}
-            >
+            <Button variant="outline" size="sm" onClick={() => setOpenScanId(null)}>
               Close
             </Button>
           </DialogFooter>
@@ -636,42 +765,38 @@ function DetailRow({
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 border-b border-border/60 pb-2 last:border-0 last:pb-0">
-      <span className="text-xs text-muted-foreground uppercase tracking-wide">
+    <div className="flex items-center justify-between gap-4 py-2.5">
+      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide w-28 shrink-0">
         {label}
       </span>
-      <span>{children}</span>
+      <span className="text-sm">{children}</span>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Empty-state card (FE-019)
-// ---------------------------------------------------------------------------
+// ── Empty state ──────────────────────────────────────────────────────
 
 function EmptyDashboardCard({ slug }: { slug: string }) {
   return (
-    <Card className="border-dashed">
-      <CardHeader>
-        <div className="flex items-center gap-2">
-          <AlertCircleIcon className="size-4 text-muted-foreground" />
-          <CardTitle className="text-base">Add your first repo</CardTitle>
+    <div className="animate-fade-up rounded-xl border border-dashed border-border/60 bg-card/50 p-6">
+      <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-center">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-500/10">
+          <AlertCircleIcon className="size-5 text-violet-400" />
         </div>
-        <CardDescription>
-          ArchMind starts mapping your codebase as soon as you add a GitHub
-          repo. Once a scan completes, this dashboard fills in.
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+        <div className="flex-1">
+          <p className="font-medium">Add your first repository</p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            ArchMind maps your codebase into a knowledge graph. Add a GitHub repo to start.
+          </p>
+        </div>
         <Link
           href={`/workspaces/${slug}/repos`}
-          className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/80"
+          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-all hover:bg-primary/85 hover:scale-[0.98]"
         >
           <PlusIcon className="size-3.5" />
-          Add a repo
+          Add repo
         </Link>
-      </CardContent>
-    </Card>
+      </div>
+    </div>
   );
 }
-

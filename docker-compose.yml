@@ -44,11 +44,18 @@ services:
       Polling__IntervalMinutes: ${Polling__IntervalMinutes:-15}
       AdminSeed__Email: ${AdminSeed__Email:-admin@archmind.local}
       AdminSeed__Password: ${AdminSeed__Password:-change-me-on-first-login}
+      # Workspace graph rebuilder (combine_workspace_graph.py): use the same
+      # Python venv that hosts graphify so networkx is already available.
+      WorkspaceGraph__PythonExecutable: /opt/graphify-venv/bin/python
+      WorkspaceGraph__CombineScriptPath: /app/scripts/combine_workspace_graph.py
     ports:
       - "5050:5000"
     volumes:
       - ./working:/var/archmind/workspaces
       - ./logs:/var/log/archmind
+      # Host-side script mounted read-only so iteration doesn't require a
+      # backend image rebuild. Read by WorkspaceGraphService after every scan.
+      - ./scripts:/app/scripts:ro
     # DO-008: give SSE/MCP streams 30s to drain on shutdown instead of the
     # default 10s SIGTERM → SIGKILL window.
     stop_grace_period: 30s

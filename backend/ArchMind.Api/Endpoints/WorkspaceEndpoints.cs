@@ -36,6 +36,10 @@ public static partial class WorkspaceEndpoints
         group.MapGet("/{slug}/api-keys", ListApiKeysAsync);
         group.MapDelete("/{slug}/api-keys/{id:guid}", RevokeApiKeyAsync);
 
+        // Claude Code custom command file — public, no auth required.
+        group.MapGet("/{slug}/claude-commands", GetClaudeCommandsAsync)
+            .AllowAnonymous();
+
         return app;
     }
 
@@ -263,6 +267,31 @@ public static partial class WorkspaceEndpoints
 
         await apiKeys.RevokeAsync(id, ct);
         return Results.NoContent();
+    }
+
+    // ---------------------------------------------------------------------
+    // Claude Code commands file (public)
+    // ---------------------------------------------------------------------
+    private static async Task<IResult> GetClaudeCommandsAsync(
+        string slug,
+        ArchMindDbContext db,
+        CancellationToken ct)
+    {
+        var exists = await db.Workspaces
+            .AsNoTracking()
+            .AnyAsync(w => w.Slug == slug, ct);
+
+        if (!exists)
+        {
+            return Results.NotFound();
+        }
+
+        var content =
+            $"""
+            Use ArchMind MCP tools to: $ARGUMENTS
+            """;
+
+        return Results.Text(content, contentType: "text/plain", contentEncoding: System.Text.Encoding.UTF8);
     }
 
     // ---------------------------------------------------------------------

@@ -1,10 +1,13 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import * as React from "react";
+import { PlusIcon } from "lucide-react";
 
 import type { SkillSummary } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -12,6 +15,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", {
   dateStyle: "medium",
@@ -36,6 +40,7 @@ export function SkillsView({
   slug: string;
   initialSkills: SkillSummary[];
 }) {
+  const router = useRouter();
   const [skills] = React.useState<SkillSummary[]>(initialSkills);
 
   if (skills.length === 0) {
@@ -44,16 +49,23 @@ export function SkillsView({
 
   return (
     <>
-      <div className="flex items-center justify-end">
+      <div className="flex items-center justify-between animate-fade-up">
+        <p className="text-sm text-muted-foreground">
+          {skills.length} skill{skills.length !== 1 ? "s" : ""}
+        </p>
         <Link
           href={`/workspaces/${slug}/skills/new`}
-          className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/80"
+          className={cn(buttonVariants({ variant: "default" }), "gap-1.5")}
         >
-          New Skill
+          <PlusIcon className="size-3.5" />
+          New skill
         </Link>
       </div>
 
-      <Card>
+      <Card
+        className="animate-fade-up overflow-hidden"
+        style={{ "--delay": "60ms" } as React.CSSProperties}
+      >
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
@@ -70,24 +82,13 @@ export function SkillsView({
                 {skills.map((skill) => (
                   <tr
                     key={skill.id}
-                    className="border-b last:border-0 hover:bg-muted/40"
+                    className="cursor-pointer border-b last:border-0 transition-colors hover:bg-muted/40"
+                    onClick={() =>
+                      router.push(`/workspaces/${slug}/skills/${skill.id}`)
+                    }
                   >
-                    <td className="px-4 py-3 font-mono text-xs">
-                      <Link
-                        href={`/workspaces/${slug}/skills/${skill.id}`}
-                        className="hover:underline"
-                      >
-                        {skill.name}
-                      </Link>
-                    </td>
-                    <td className="px-4 py-3">
-                      <Link
-                        href={`/workspaces/${slug}/skills/${skill.id}`}
-                        className="hover:underline"
-                      >
-                        {skill.title}
-                      </Link>
-                    </td>
+                    <td className="px-4 py-3 font-mono text-xs">{skill.name}</td>
+                    <td className="px-4 py-3 font-medium">{skill.title}</td>
                     <td
                       className="px-4 py-3 text-muted-foreground"
                       title={skill.description}
@@ -126,9 +127,10 @@ function EmptyState({ slug }: { slug: string }) {
         <CardContent className="flex justify-center pb-4">
           <Link
             href={`/workspaces/${slug}/skills/new`}
-            className="inline-flex h-8 items-center justify-center rounded-lg bg-primary px-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/80"
+            className={cn(buttonVariants({ variant: "default" }), "gap-1.5")}
           >
-            New Skill
+            <PlusIcon className="size-3.5" />
+            New skill
           </Link>
         </CardContent>
       </Card>

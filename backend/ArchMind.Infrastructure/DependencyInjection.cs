@@ -10,6 +10,7 @@ using ArchMind.Infrastructure.GitHub;
 using ArchMind.Infrastructure.Graph;
 using ArchMind.Infrastructure.Graphify;
 using ArchMind.Infrastructure.Llm;
+using ArchMind.Infrastructure.Manifests;
 using ArchMind.Infrastructure.Services;
 using ArchMind.Infrastructure.Telemetry;
 using Microsoft.Extensions.DependencyInjection;
@@ -46,6 +47,27 @@ public static class DependencyInjection
         // BE-013: Graphify subprocess wrapper (extracts structural AST graph).
         services.AddOptions<GraphifyOptions>().BindConfiguration("Graphify");
         services.AddSingleton<IGraphifyRunner, GraphifyRunner>();
+
+        // Singleton cache of the on-disk graphify-out/graph.json, shared across
+        // all per-file LlmExtractionJob calls for the same (workspace, repo) pair.
+        services.AddSingleton<IGraphifyContextService, GraphifyContextService>();
+
+        // Workspace-level combined graph: merges all per-repo graph.json files,
+        // colours nodes by repo, writes combined_graph.html + combined_graph.json
+        // to <workspaceDir>/graphify-out/ after every successful scan.
+        services.AddOptions<WorkspaceGraphOptions>().BindConfiguration("WorkspaceGraph");
+        services.AddSingleton<IWorkspaceGraphService, WorkspaceGraphService>();
+
+        // Read-side: parses combined_graph.json for the admin UI's Structural
+        // tab and for LLM-assisted node search. In-memory cached per workspace
+        // (15-min TTL); invalidated explicitly by WorkspaceGraphService after rebuild.
+        services.AddSingleton<StructuralGraphService>();
+        services.AddSingleton<IStructuralGraphService>(sp => sp.GetRequiredService<StructuralGraphService>());
+
+        // Deterministic manifest scanner (csproj / package.json / pyproject).
+        // Used to synthesise a Service node when LLM extraction failed to
+        // identify one, and to emit cross-repo SHARES_PACKAGE_WITH edges.
+        services.AddSingleton<IRepoManifestService, RepoManifestService>();
 
         // BE-017 / BE-018: extraction prompt library + per-file content resolver
         // and repository. The Hangfire job class itself is registered in

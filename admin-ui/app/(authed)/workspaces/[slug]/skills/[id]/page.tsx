@@ -8,7 +8,9 @@ import type { Skill, SkillRevisionSummary } from "@/lib/types";
 import { SkillEditorView } from "./skill-editor-view";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  (typeof window === "undefined" ? process.env.INTERNAL_API_URL : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:5000";
 
 async function buildCookieHeaders(): Promise<HeadersInit> {
   const cookieStore = await cookies();

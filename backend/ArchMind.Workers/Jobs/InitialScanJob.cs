@@ -16,6 +16,7 @@ namespace ArchMind.Workers.Jobs;
 /// is better surfaced as a failed status than silently re-run.
 /// </summary>
 [AutomaticRetry(Attempts = 1)]
+[Queue("scan")]
 public sealed class InitialScanJob
 {
     private readonly IRepoScanPipeline _pipeline;
@@ -29,6 +30,10 @@ public sealed class InitialScanJob
     /// Hangfire entry point. Workspace id is passed explicitly so the
     /// orchestrator can guard against cross-workspace mismatches even if the
     /// repo id is stale.
+    ///
+    /// Routed to the "scan" queue so a dedicated Hangfire server (WorkerCount=5)
+    /// caps simultaneous repo scans at 5 while leaving the default-queue worker
+    /// pool free to process per-file LlmExtractionJob items at its own pace.
     /// </summary>
     public Task RunAsync(Guid workspaceId, Guid repoId, CancellationToken ct = default)
         => _pipeline.RunAsync(workspaceId, repoId, scanKind: "initial", ct);

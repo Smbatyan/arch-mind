@@ -29,6 +29,7 @@ import {
 
 export type RepoDetail = {
   id: string;
+  name: string;
   githubUrl: string;
   defaultBranch: string;
   lastProcessedSha: string | null;
@@ -200,18 +201,19 @@ export function RepoDetailView({
         <CardHeader>
           <div className="flex items-start justify-between gap-3">
             <div className="flex flex-col gap-1 min-w-0">
-              <CardTitle className="flex items-center gap-1.5">
+              <CardTitle className="text-lg font-semibold truncate">
+                {repo.name || repo.githubUrl}
+              </CardTitle>
+              <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 <a
                   href={repo.githubUrl}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="font-mono text-sm break-all hover:underline"
+                  className="inline-flex items-center gap-1 font-mono hover:underline"
                 >
                   {repo.githubUrl}
+                  <ExternalLinkIcon className="size-3 shrink-0 text-muted-foreground" />
                 </a>
-                <ExternalLinkIcon className="size-3.5 shrink-0 text-muted-foreground" />
-              </CardTitle>
-              <CardDescription className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
                 <span>
                   branch:{" "}
                   <span className="font-mono text-foreground">
@@ -351,9 +353,10 @@ export function RepoDetailView({
           <AlertDialogHeader>
             <AlertDialogTitle>Disconnect repository?</AlertDialogTitle>
             <AlertDialogDescription>
-              This removes <span className="font-mono">{repo.githubUrl}</span>{" "}
-              from this workspace. Ingested data remains until explicitly
-              cleaned up.
+              This removes{" "}
+              <span className="font-semibold">{repo.name || repo.githubUrl}</span>{" "}
+              (<span className="font-mono text-xs">{repo.githubUrl}</span>) from
+              this workspace. Ingested data remains until explicitly cleaned up.
             </AlertDialogDescription>
           </AlertDialogHeader>
           {deleteError ? (

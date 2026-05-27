@@ -65,6 +65,7 @@ public sealed class RepoScanPipeline : IRepoScanPipeline
 
     private readonly IRepoCloneService _cloneService;
     private readonly IGraphifyRunner _graphifyRunner;
+    private readonly IWorkspaceGraphService _workspaceGraphService;
     private readonly IBackgroundJobClient _backgroundJobClient;
     private readonly ArchMindDbContext _db;
     private readonly ILogger<RepoScanPipeline> _logger;
@@ -72,12 +73,14 @@ public sealed class RepoScanPipeline : IRepoScanPipeline
     public RepoScanPipeline(
         IRepoCloneService cloneService,
         IGraphifyRunner graphifyRunner,
+        IWorkspaceGraphService workspaceGraphService,
         IBackgroundJobClient backgroundJobClient,
         ArchMindDbContext db,
         ILogger<RepoScanPipeline> logger)
     {
         _cloneService = cloneService;
         _graphifyRunner = graphifyRunner;
+        _workspaceGraphService = workspaceGraphService;
         _backgroundJobClient = backgroundJobClient;
         _db = db;
         _logger = logger;
@@ -157,6 +160,12 @@ public sealed class RepoScanPipeline : IRepoScanPipeline
             _logger.LogInformation(
                 "RepoScanPipeline complete workspace={WorkspaceId} repo={RepoId} kind={Kind} sha={Sha}",
                 workspaceId, repoId, scanKind, currentSha);
+
+            // 5. Rebuild workspace-level combined graph (repo-coloured HTML).
+            // Non-fatal: failures are logged but never abort the scan. Runs
+            // synchronously here because it is fast (Python, no LLM) and we
+            // want the updated combined_graph.html available immediately.
+            await _workspaceGraphService.RebuildAsync(workspaceId, ct);
 
             // BE-026: schedule the cross-file correlator to run after a settle
             // window so that the bulk of per-file extraction jobs have had time

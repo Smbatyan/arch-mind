@@ -10,6 +10,10 @@ public class Repo : IWorkspaceScoped
 {
     public Guid Id { get; set; }
     public Guid WorkspaceId { get; set; }
+
+    /// <summary>Display name shown in UI lists / nav. Auto-derived from GitHubUrl repo segment when not provided on create.</summary>
+    public string Name { get; set; } = string.Empty;
+
     public string GitHubUrl { get; set; } = string.Empty;
     public string DefaultBranch { get; set; } = "main";
     public string? LastProcessedSha { get; set; }

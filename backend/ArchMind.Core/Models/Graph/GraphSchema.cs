@@ -37,7 +37,7 @@ public static class GraphSchema
 
     public static readonly IReadOnlyList<EdgeLabelSpec> EdgeLabels = new[]
     {
-        new EdgeLabelSpec("CALLS",          FromLabels: new[] { "Service" },                                              ToLabels: new[] { "Endpoint" }),
+        new EdgeLabelSpec("CALLS",          FromLabels: new[] { "Service" },                                              ToLabels: new[] { "Endpoint", "Service" }),
         new EdgeLabelSpec("EXPOSES",        FromLabels: new[] { "Service" },                                              ToLabels: new[] { "Endpoint" }),
         new EdgeLabelSpec("READS_FROM",     FromLabels: new[] { "Service" },                                              ToLabels: new[] { "Database", "Storage" }),
         new EdgeLabelSpec("WRITES_TO",      FromLabels: new[] { "Service" },                                              ToLabels: new[] { "Database", "Storage" }),
@@ -50,6 +50,7 @@ public static class GraphSchema
         new EdgeLabelSpec("RELATES_TO",     FromLabels: new[] { "Concept" },                                              ToLabels: new[] { "Concept", "Service", "Capability" }),
         new EdgeLabelSpec("STORES",         FromLabels: new[] { "Storage" },                                              ToLabels: new[] { "Concept" }),
         new EdgeLabelSpec("CONFLICTS_WITH", FromLabels: new[] { "*" },                                                    ToLabels: new[] { "*" }),
+        new EdgeLabelSpec("SHARES_PACKAGE_WITH", FromLabels: new[] { "Service" },                                         ToLabels: new[] { "Service" }),
     };
 
     /// <summary>Lookup by exact label name. Returns null if unknown.</summary>

@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import * as React from "react";
 
@@ -16,6 +17,13 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NodeClarificationsPanel } from "@/components/node-clarifications-panel";
+import type { VisData } from "./graph-canvas";
+
+// WebGL canvas — no SSR (Three.js requires browser)
+const GraphCanvasView = dynamic(
+  () => import("./graph-canvas").then((m) => ({ default: m.GraphCanvasView })),
+  { ssr: false, loading: () => <CanvasPlaceholder text="Loading canvas…" /> }
+);
 
 // ---------------------------------------------------------------------------
 // Types — mirror the backend DTOs from GraphEndpoints.cs.
@@ -52,6 +60,14 @@ type NodeDetail = {
 // Hard cap matches the backend default; pagination is a Sprint 4 follow-up.
 const NODE_LIMIT = 200;
 
+function CanvasPlaceholder({ text }: { text: string }) {
+  return (
+    <div className="flex h-[500px] items-center justify-center rounded-md border border-dashed border-border text-sm text-muted-foreground">
+      {text}
+    </div>
+  );
+}
+
 function shortId(id: string): string {
   return id.length > 8 ? id.slice(0, 8) : id;
 }
@@ -70,8 +86,10 @@ function formatPropertyValue(value: unknown): string {
 }
 
 // ---------------------------------------------------------------------------
-// Root component — three-pane layout.
+// Root component — tab bar + two modes (List / Visual).
 // ---------------------------------------------------------------------------
+type Tab = "list" | "visual" | "structural";
+
 export function GraphBrowser({
   slug,
   initialLabels,
@@ -79,10 +97,28 @@ export function GraphBrowser({
   slug: string;
   initialLabels: GraphLabelsResponse;
 }) {
+  const [tab, setTab] = React.useState<Tab>("visual");
+
+  // List-mode state
   const [selectedLabel, setSelectedLabel] = React.useState<string | null>(null);
   const [selectedNode, setSelectedNode] = React.useState<
     { label: string; id: string } | null
   >(null);
+
+  // Visual-mode data
+  const [visData, setVisData] = React.useState<VisData | null>(null);
+  const [visLoading, setVisLoading] = React.useState(false);
+  const [visError, setVisError] = React.useState<string | null>(null);
+
+  // Structural-mode data + search
+  const [structData, setStructData] = React.useState<VisData | null>(null);
+  const [structLoading, setStructLoading] = React.useState(false);
+  const [structError, setStructError] = React.useState<string | null>(null);
+  const [structQuery, setStructQuery] = React.useState("");
+  const [structHitIds, setStructHitIds] = React.useState<string[]>([]);
+  const [structKeywords, setStructKeywords] = React.useState<string[]>([]);
+  const [structSearching, setStructSearching] = React.useState(false);
+  const [structSearchError, setStructSearchError] = React.useState<string | null>(null);
 
   const handleSelectLabel = React.useCallback((label: string) => {
     setSelectedLabel(label);
@@ -97,6 +133,92 @@ export function GraphBrowser({
     []
   );
 
+  // Lazy-load visualization data on first switch to visual tab
+  const visLoaded = React.useRef(false);
+  React.useEffect(() => {
+    if (tab !== "visual" || visLoaded.current) return;
+    visLoaded.current = true;
+    setVisLoading(true);
+    api<VisData>(`/api/workspaces/${slug}/graph/visualization?limit=500`)
+      .then((d) => {
+        setVisData(d);
+        setVisLoading(false);
+      })
+      .catch((err) => {
+        setVisError(err instanceof Error ? err.message : "Failed to load graph.");
+        setVisLoading(false);
+      });
+  }, [tab, slug]);
+
+  // Lazy-load structural (AST) data on first switch to structural tab.
+  // Backend shape: StructuralDataDto → maps directly to VisData (id, label, name, repoId).
+  const structLoaded = React.useRef(false);
+  React.useEffect(() => {
+    if (tab !== "structural" || structLoaded.current) return;
+    structLoaded.current = true;
+    setStructLoading(true);
+    type StructuralNodeDto = {
+      id: string;
+      label: string;
+      name: string;
+      repoId: string | null;
+      sourceFile: string | null;
+      degree: number;
+    };
+    type StructuralEdgeDto = { id: string; source: string; target: string; label: string };
+    type StructuralDataDto = {
+      nodes: StructuralNodeDto[];
+      edges: StructuralEdgeDto[];
+      totalNodes: number;
+      totalEdges: number;
+      truncated: boolean;
+    };
+    api<StructuralDataDto>(`/api/workspaces/${slug}/graph/structural?limit=500`)
+      .then((d) => {
+        setStructData({
+          nodes: d.nodes.map((n) => ({
+            id: n.id,
+            label: n.label,
+            name: n.name,
+            repoId: n.repoId,
+          })),
+          edges: d.edges,
+          truncated: d.truncated,
+        });
+        setStructLoading(false);
+      })
+      .catch((err) => {
+        setStructError(err instanceof Error ? err.message : "Failed to load graph.");
+        setStructLoading(false);
+      });
+  }, [tab, slug]);
+
+  // Submit NL search: one Haiku call → keywords + matched node IDs.
+  const runStructuralSearch = React.useCallback(async () => {
+    const q = structQuery.trim();
+    if (!q) {
+      setStructHitIds([]);
+      setStructKeywords([]);
+      setStructSearchError(null);
+      return;
+    }
+    setStructSearching(true);
+    setStructSearchError(null);
+    try {
+      const res = await api<{ keywords: string[]; nodeIds: string[] }>(
+        `/api/workspaces/${slug}/graph/structural/search`,
+        { method: "POST", body: JSON.stringify({ q }) }
+      );
+      setStructKeywords(res.keywords ?? []);
+      setStructHitIds(res.nodeIds ?? []);
+    } catch (err) {
+      setStructSearchError(err instanceof Error ? err.message : "Search failed.");
+      setStructHitIds([]);
+    } finally {
+      setStructSearching(false);
+    }
+  }, [slug, structQuery]);
+
   const graphIsEmpty =
     initialLabels.vertices.length === 0 && initialLabels.edges.length === 0;
 
@@ -106,9 +228,7 @@ export function GraphBrowser({
         <Card className="w-full max-w-md">
           <CardHeader>
             <CardTitle>Graph is empty</CardTitle>
-            <CardDescription>
-              Run a scan to populate the graph.
-            </CardDescription>
+            <CardDescription>Run a scan to populate the graph.</CardDescription>
           </CardHeader>
           <CardContent>
             <Link
@@ -124,28 +244,142 @@ export function GraphBrowser({
   }
 
   return (
-    <div className="grid min-h-[600px] w-full grid-cols-1 gap-4 px-4 md:px-6 lg:grid-cols-[18rem_22rem_minmax(0,1fr)]">
-      <LabelsPane
-        labels={initialLabels}
-        selectedLabel={selectedLabel}
-        onSelect={handleSelectLabel}
-      />
-      <NodesPane
-        slug={slug}
-        label={selectedLabel}
-        labelCount={
-          selectedLabel
-            ? initialLabels.vertices.find((v) => v.label === selectedLabel)?.count ?? 0
-            : 0
-        }
-        selectedNodeId={selectedNode?.id ?? null}
-        onSelectNode={handleSelectNode}
-      />
-      <DetailPane
-        slug={slug}
-        selectedNode={selectedNode}
-        onSelectNode={handleSelectNode}
-      />
+    <div className="flex w-full flex-col gap-4 px-4 md:px-6">
+      {/* Tab bar */}
+      <div className="flex gap-1 rounded-md border border-border bg-muted/40 p-0.5 w-fit">
+        {(["visual", "structural", "list"] as Tab[]).map((t) => (
+          <button
+            key={t}
+            type="button"
+            onClick={() => setTab(t)}
+            className={`rounded px-3 py-1 text-sm font-medium capitalize transition-colors ${
+              tab === t
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            {t === "list" ? "List" : t === "visual" ? "Semantic" : "Structural"}
+          </button>
+        ))}
+      </div>
+
+      {/* List mode */}
+      {tab === "list" && (
+        <div className="grid min-h-[600px] w-full grid-cols-1 gap-4 lg:grid-cols-[18rem_22rem_minmax(0,1fr)]">
+          <LabelsPane
+            labels={initialLabels}
+            selectedLabel={selectedLabel}
+            onSelect={handleSelectLabel}
+          />
+          <NodesPane
+            slug={slug}
+            label={selectedLabel}
+            labelCount={
+              selectedLabel
+                ? initialLabels.vertices.find((v) => v.label === selectedLabel)?.count ?? 0
+                : 0
+            }
+            selectedNodeId={selectedNode?.id ?? null}
+            onSelectNode={handleSelectNode}
+          />
+          <DetailPane
+            slug={slug}
+            selectedNode={selectedNode}
+            onSelectNode={handleSelectNode}
+          />
+        </div>
+      )}
+
+      {/* Visual mode */}
+      {tab === "visual" && (
+        <div className="w-full">
+          {visLoading && <CanvasPlaceholder text="Loading graph data…" />}
+          {visError && (
+            <Alert variant="destructive">
+              <AlertDescription>{visError}</AlertDescription>
+            </Alert>
+          )}
+          {visData && <GraphCanvasView slug={slug} data={visData} />}
+        </div>
+      )}
+
+      {/* Structural mode (AST from graphify, no LLM extraction) */}
+      {tab === "structural" && (
+        <div className="flex w-full flex-col gap-2">
+          {/* NL search bar */}
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-card/40 p-2">
+            <Input
+              type="search"
+              value={structQuery}
+              onChange={(e) => setStructQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void runStructuralSearch();
+                }
+              }}
+              placeholder="Ask in plain English (e.g. “where is auth handled?”) — one cheap Haiku call per search"
+              className="h-8 flex-1 min-w-[260px] text-sm"
+            />
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => void runStructuralSearch()}
+              disabled={structSearching || !structQuery.trim()}
+            >
+              {structSearching ? "Searching…" : "Search"}
+            </Button>
+            {structKeywords.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+                <span>Keywords:</span>
+                {structKeywords.map((k) => (
+                  <Badge key={k} variant="outline" className="font-mono text-[0.65rem]">
+                    {k}
+                  </Badge>
+                ))}
+                <span className="ml-1 opacity-70">
+                  {structHitIds.length} match{structHitIds.length === 1 ? "" : "es"}
+                </span>
+              </div>
+            )}
+            {(structHitIds.length > 0 || structKeywords.length > 0) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setStructQuery("");
+                  setStructHitIds([]);
+                  setStructKeywords([]);
+                  setStructSearchError(null);
+                }}
+              >
+                Clear
+              </Button>
+            )}
+          </div>
+          {structSearchError && (
+            <Alert variant="destructive">
+              <AlertDescription>{structSearchError}</AlertDescription>
+            </Alert>
+          )}
+
+          {structLoading && <CanvasPlaceholder text="Loading structural graph…" />}
+          {structError && (
+            <Alert variant="destructive">
+              <AlertDescription>{structError}</AlertDescription>
+            </Alert>
+          )}
+          {structData && (
+            <GraphCanvasView
+              slug={slug}
+              data={structData}
+              defaultColorMode="repo"
+              highlightedNodeIds={structHitIds.length > 0 ? structHitIds : undefined}
+            />
+          )}
+        </div>
+      )}
     </div>
   );
 }

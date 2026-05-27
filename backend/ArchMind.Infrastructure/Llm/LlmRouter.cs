@@ -62,15 +62,20 @@ public class LlmRouter : ILlmRouter
     /// <summary>
     /// Routing table from ArchMind-MVP-Technical.md section 7.
     /// Cheap deterministic tasks → Haiku. Reasoning-heavy tasks → Sonnet.
+    ///
+    /// Cost-optimised mode (current): every task routes to Haiku 4.5. Reasoning
+    /// tasks (cross-file correlation, ambiguity detection, impact analysis) take
+    /// a quality hit vs Sonnet but stay functional. Flip the Sonnet branches
+    /// back on when quality matters more than cost.
     /// </summary>
     private static AnthropicModel SelectModel(LlmTaskType taskType) => taskType switch
     {
         LlmTaskType.Extraction => AnthropicModel.Haiku,
         LlmTaskType.Classification => AnthropicModel.Haiku,
         LlmTaskType.QuestionGeneration => AnthropicModel.Haiku,
-        LlmTaskType.CrossFileCorrelation => AnthropicModel.Sonnet,
-        LlmTaskType.AmbiguityDetection => AnthropicModel.Sonnet,
-        LlmTaskType.ImpactAnalysis => AnthropicModel.Sonnet,
+        LlmTaskType.CrossFileCorrelation => AnthropicModel.Haiku,
+        LlmTaskType.AmbiguityDetection => AnthropicModel.Haiku,
+        LlmTaskType.ImpactAnalysis => AnthropicModel.Haiku,
         _ => throw new ArgumentOutOfRangeException(nameof(taskType))
     };
 

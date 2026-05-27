@@ -3,7 +3,9 @@ import { cookies } from "next/headers";
 import { WorkspacesView, type Workspace } from "./workspaces-view";
 
 const API_URL =
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:5000";
+  (typeof window === "undefined" ? process.env.INTERNAL_API_URL : undefined) ??
+  process.env.NEXT_PUBLIC_API_URL ??
+  "http://localhost:5000";
 
 async function fetchWorkspaces(): Promise<Workspace[]> {
   const cookieStore = await cookies();

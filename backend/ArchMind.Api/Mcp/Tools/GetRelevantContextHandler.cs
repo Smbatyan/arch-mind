@@ -131,18 +131,23 @@ public sealed class GetRelevantContextHandler
 
         var tokens = ExtractSignificantTokens(task);
 
-        // Run all three lookups in parallel. Failures in any one bucket are
+        // Run all four lookups in parallel. Failures in any one bucket are
         // logged and degrade gracefully to an empty list — the tool should
         // never hard-fail a request just because graph search blew up.
         var skillsTask = SafeSkillsAsync(workspaceId, task, ct);
         var graphTask = SafeGraphAsync(workspaceId, tokens, ct);
         var filesTask = SafeFilesAsync(workspaceId, filePaths, ct);
+        // Extraction search queries the incremental file-extraction layer (updated every 30 min
+        // via DiffScan) for endpoints/events/storage matching the task tokens. This is always
+        // fresher than the graphify structural graph, which only updates on full rescan.
+        var extractionTask = SafeExtractionSearchAsync(workspaceId, tokens, ct);
 
-        await Task.WhenAll(skillsTask, graphTask, filesTask).ConfigureAwait(false);
+        await Task.WhenAll(skillsTask, graphTask, filesTask, extractionTask).ConfigureAwait(false);
 
         var matchedSkills = skillsTask.Result;
         var graphHits = graphTask.Result;
         var fileRows = filesTask.Result;
+        var extractionRows = extractionTask.Result;
 
         // ── Budget assembly ────────────────────────────────────────────────
         var skillItems = matchedSkills
@@ -157,22 +162,38 @@ public sealed class GetRelevantContextHandler
             .Select(BuildFileItem)
             .ToList();
 
+        var extractionItems = extractionRows
+            .Select(BuildExtractionHitItem)
+            .ToList();
+
         var truncated = false;
 
         // Compute total estimate. Skills are highest priority — never trimmed.
+        // Drop order: graph first (stale, structural-only), then extraction hits,
+        // then trim files (highest value — explicitly requested by caller).
         var skillChars = skillItems.Sum(CountChars);
         var graphChars = graphItems.Sum(CountChars);
         var fileChars = fileItems.Sum(CountChars);
+        var extractionChars = extractionItems.Sum(CountChars);
 
         int Estimate(int chars) => (int)Math.Ceiling(chars / CharsPerToken);
 
-        var estimate = Estimate(skillChars + graphChars + fileChars);
+        var estimate = Estimate(skillChars + graphChars + fileChars + extractionChars);
 
         if (estimate > maxTokens)
         {
-            // Drop graph first.
+            // Drop graph first (stale structural graph).
             graphItems = new List<GraphItem>();
             graphChars = 0;
+            truncated = true;
+            estimate = Estimate(skillChars + fileChars + extractionChars);
+        }
+
+        if (estimate > maxTokens && extractionItems.Count > 0)
+        {
+            // Drop extraction hits second.
+            extractionItems = new List<ExtractionHitItem>();
+            extractionChars = 0;
             truncated = true;
             estimate = Estimate(skillChars + fileChars);
         }
@@ -192,11 +213,12 @@ public sealed class GetRelevantContextHandler
 
         sw.Stop();
         _logger.LogInformation(
-            "get_relevant_context completed. workspace={WorkspaceId} latencyMs={LatencyMs} skills={Skills} graph={Graph} files={Files} tokens={Tokens} truncated={Truncated} repo={Repo}",
+            "get_relevant_context completed. workspace={WorkspaceId} latencyMs={LatencyMs} skills={Skills} graph={Graph} extractions={Extractions} files={Files} tokens={Tokens} truncated={Truncated} repo={Repo}",
             workspaceId,
             sw.ElapsedMilliseconds,
             skillItems.Count,
             graphItems.Count,
+            extractionItems.Count,
             fileItems.Count,
             estimate,
             truncated,
@@ -206,6 +228,7 @@ public sealed class GetRelevantContextHandler
         {
             skills = skillItems,
             graph = graphItems,
+            extraction_hits = extractionItems,
             files = fileItems,
             token_estimate = estimate,
             truncated,
@@ -260,6 +283,23 @@ public sealed class GetRelevantContextHandler
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "File extraction lookup failed for workspace {WorkspaceId}.", workspaceId);
+            return Array.Empty<FileExtractionRow>();
+        }
+    }
+
+    private async Task<IReadOnlyList<FileExtractionRow>> SafeExtractionSearchAsync(
+        Guid workspaceId, IReadOnlyList<string> tokens, CancellationToken ct)
+    {
+        if (tokens.Count == 0) return Array.Empty<FileExtractionRow>();
+        try
+        {
+            return await _fileExtractions
+                .SearchByTokensAsync(workspaceId, tokens, limit: 15, ct)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Extraction search failed for workspace {WorkspaceId}.", workspaceId);
             return Array.Empty<FileExtractionRow>();
         }
     }
@@ -367,11 +407,34 @@ public sealed class GetRelevantContextHandler
         return list;
     }
 
+    private static ExtractionHitItem BuildExtractionHitItem(FileExtractionRow row)
+    {
+        var endpoints = row.Record.Endpoints?.Endpoints
+            .Select(e => new EndpointHit(e.Method, e.Path, e.HandlerSymbol))
+            .ToList() ?? new List<EndpointHit>();
+
+        var eventsPublished = row.Record.EventsPublished?.Publishes
+            .Select(e => new EventHit(e.Name, e.Topic))
+            .ToList() ?? new List<EventHit>();
+
+        var eventsConsumed = row.Record.EventsConsumed?.Consumes
+            .Select(e => new EventHit(e.Name, e.Topic))
+            .ToList() ?? new List<EventHit>();
+
+        return new ExtractionHitItem(row.FilePath, endpoints, eventsPublished, eventsConsumed);
+    }
+
     private static int CountChars(SkillItem s) =>
         (s.Name?.Length ?? 0) + (s.Title?.Length ?? 0) + (s.Body?.Length ?? 0);
 
     private static int CountChars(GraphItem g) =>
         (g.Label?.Length ?? 0) + (g.Name?.Length ?? 0) + (g.Description?.Length ?? 0);
+
+    private static int CountChars(ExtractionHitItem e) =>
+        (e.File?.Length ?? 0) +
+        e.Endpoints.Sum(ep => (ep.Method?.Length ?? 0) + (ep.Path?.Length ?? 0) + (ep.Handler?.Length ?? 0)) +
+        e.EventsPublished.Sum(ev => (ev.Name?.Length ?? 0) + (ev.Topic?.Length ?? 0)) +
+        e.EventsConsumed.Sum(ev => (ev.Name?.Length ?? 0) + (ev.Topic?.Length ?? 0));
 
     private static int CountChars(FileItem f)
     {
@@ -422,4 +485,11 @@ public sealed class GetRelevantContextHandler
     private sealed record SkillItem(string Name, string Title, string Body);
     private sealed record GraphItem(string Label, string Name, string? Description);
     private sealed record FileItem(string Path, string Summary, List<object> Components);
+    private sealed record EndpointHit(string Method, string Path, string Handler);
+    private sealed record EventHit(string Name, string? Topic);
+    private sealed record ExtractionHitItem(
+        string File,
+        List<EndpointHit> Endpoints,
+        List<EventHit> EventsPublished,
+        List<EventHit> EventsConsumed);
 }

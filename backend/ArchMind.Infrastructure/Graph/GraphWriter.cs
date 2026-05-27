@@ -98,18 +98,19 @@ internal sealed class GraphWriter : IGraphWriter
         if (workspaceId == Guid.Empty)
             throw new ArgumentException("workspace_id is required.", nameof(workspaceId));
 
+        var paramsJson = BuildParamsJson(new Dictionary<string, object?>
+        {
+            ["id"] = nodeId.ToString(),
+            ["ws"] = workspaceId.ToString(),
+        });
         var sql = $@"
-SELECT * FROM cypher('{GraphName}', $$
+SELECT r FROM public.archmind_cypher_query('{GraphName}', $cy$
     MATCH (n:{label} {{ id: $id, workspace_id: $ws }})
     DETACH DELETE n
-$$, {BuildParamsLiteral(new Dictionary<string, object?>
-{
-    ["id"] = nodeId.ToString(),
-    ["ws"] = workspaceId.ToString(),
-})}) AS (a agtype);";
+$cy$, $1) AS r;";
 
         await using var conn = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
-        await ExecuteCypherAsync(conn, transaction: null, sql, ct).ConfigureAwait(false);
+        await ExecuteCypherAsync(conn, transaction: null, sql, ct, paramsJson).ConfigureAwait(false);
     }
 
     public async Task RemoveEdgeAsync(Guid workspaceId, string edgeLabel, Guid sourceId, Guid targetId, CancellationToken ct = default)
@@ -118,19 +119,20 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
         if (workspaceId == Guid.Empty)
             throw new ArgumentException("workspace_id is required.", nameof(workspaceId));
 
+        var paramsJson = BuildParamsJson(new Dictionary<string, object?>
+        {
+            ["sid"] = sourceId.ToString(),
+            ["tid"] = targetId.ToString(),
+            ["ws"] = workspaceId.ToString(),
+        });
         var sql = $@"
-SELECT * FROM cypher('{GraphName}', $$
+SELECT r FROM public.archmind_cypher_query('{GraphName}', $cy$
     MATCH (a {{ id: $sid, workspace_id: $ws }})-[r:{edgeLabel}]->(b {{ id: $tid, workspace_id: $ws }})
     DELETE r
-$$, {BuildParamsLiteral(new Dictionary<string, object?>
-{
-    ["sid"] = sourceId.ToString(),
-    ["tid"] = targetId.ToString(),
-    ["ws"] = workspaceId.ToString(),
-})}) AS (a agtype);";
+$cy$, $1) AS r;";
 
         await using var conn = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
-        await ExecuteCypherAsync(conn, transaction: null, sql, ct).ConfigureAwait(false);
+        await ExecuteCypherAsync(conn, transaction: null, sql, ct, paramsJson).ConfigureAwait(false);
     }
 
     public async Task<int> RemoveOrphansForFileAsync(Guid workspaceId, Guid repoId, string filePath, CancellationToken ct = default)
@@ -147,8 +149,14 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
         // for a (workspace, repo, file) is whatever's currently stored on
         // surviving nodes from the latest extraction run; orphans are nodes
         // whose last_extraction_id differs from the maximum.
+        var paramsJson = BuildParamsJson(new Dictionary<string, object?>
+        {
+            ["ws"] = workspaceId.ToString(),
+            ["repo"] = repoId.ToString(),
+            ["fp"] = filePath,
+        });
         var sql = $@"
-SELECT count FROM cypher('{GraphName}', $$
+SELECT r FROM public.archmind_cypher_query('{GraphName}', $cy$
     MATCH (n {{ workspace_id: $ws, repo_id: $repo, file_path: $fp }})
     WITH max(n.last_extraction_id) AS current_ext
     MATCH (n {{ workspace_id: $ws, repo_id: $repo, file_path: $fp }})
@@ -156,16 +164,16 @@ SELECT count FROM cypher('{GraphName}', $$
     WITH collect(n) AS orphans
     FOREACH (x IN orphans | DETACH DELETE x)
     RETURN size(orphans)
-$$, {BuildParamsLiteral(new Dictionary<string, object?>
-{
-    ["ws"] = workspaceId.ToString(),
-    ["repo"] = repoId.ToString(),
-    ["fp"] = filePath,
-})}) AS (count agtype);";
+$cy$, $1) AS r;";
 
         await using var conn = await _connectionFactory.OpenAsync(ct).ConfigureAwait(false);
         await using var cmd = (NpgsqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
+        cmd.Parameters.Add(new NpgsqlParameter
+        {
+            Value = paramsJson,
+            NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb,
+        });
 
         // agtype scalars come back as strings shaped like "5" — parse defensively.
         var scalar = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false);
@@ -224,20 +232,21 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
         if (spec.LastExtractionId is { } extId)
             props["last_extraction_id"] = extId.ToString();
 
+        var paramsJson = BuildParamsJson(new Dictionary<string, object?>
+        {
+            ["id"] = spec.Id.ToString(),
+            ["ws"] = spec.WorkspaceId.ToString(),
+        });
+        var propsLiteral = BuildCypherMap(props);
         var sql = $@"
-SELECT * FROM cypher('{GraphName}', $$
+SELECT r FROM public.archmind_cypher_query('{GraphName}', $cy$
     MERGE (n:{spec.Label} {{ id: $id, workspace_id: $ws }})
-    SET n += $props,
+    SET n += {propsLiteral},
         n.updated_at = timestamp()
     RETURN n
-$$, {BuildParamsLiteral(new Dictionary<string, object?>
-{
-    ["id"] = spec.Id.ToString(),
-    ["ws"] = spec.WorkspaceId.ToString(),
-    ["props"] = props,
-})}) AS (n agtype);";
+$cy$, $1) AS r;";
 
-        await ExecuteCypherAsync(conn, transaction, sql, ct).ConfigureAwait(false);
+        await ExecuteCypherAsync(conn, transaction, sql, ct, paramsJson).ConfigureAwait(false);
     }
 
     private async Task UpsertEdgeCoreAsync(DbConnection conn, DbTransaction? transaction, GraphEdgeSpec spec, CancellationToken ct)
@@ -252,23 +261,24 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
             ? new Dictionary<string, object?>()
             : SanitizeProperties(spec.Properties);
 
+        var paramsJson = BuildParamsJson(new Dictionary<string, object?>
+        {
+            ["sid"] = spec.SourceId.ToString(),
+            ["tid"] = spec.TargetId.ToString(),
+            ["ws"] = spec.WorkspaceId.ToString(),
+        });
+        var propsLiteral = BuildCypherMap(props);
         var sql = $@"
-SELECT * FROM cypher('{GraphName}', $$
+SELECT r FROM public.archmind_cypher_query('{GraphName}', $cy$
     MATCH (a {{ id: $sid, workspace_id: $ws }}),
           (b {{ id: $tid, workspace_id: $ws }})
     MERGE (a)-[r:{spec.Label}]->(b)
-    SET r += $props,
+    SET r += {propsLiteral},
         r.updated_at = timestamp()
     RETURN r
-$$, {BuildParamsLiteral(new Dictionary<string, object?>
-{
-    ["sid"] = spec.SourceId.ToString(),
-    ["tid"] = spec.TargetId.ToString(),
-    ["ws"] = spec.WorkspaceId.ToString(),
-    ["props"] = props,
-})}) AS (r agtype);";
+$cy$, $1) AS r;";
 
-        await ExecuteCypherAsync(conn, transaction, sql, ct).ConfigureAwait(false);
+        await ExecuteCypherAsync(conn, transaction, sql, ct, paramsJson).ConfigureAwait(false);
     }
 
     // ---- helpers ----
@@ -383,23 +393,37 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
     }
 
     /// <summary>
-    /// Renders the parameter map as an inline <c>'{...}'::agtype</c> literal.
+    /// Serialises the parameter map to a JSON string suitable for binding as
+    /// an <c>ag_catalog.agtype</c> NpgsqlParameter ($1) in the cypher() call.
+    /// AGE 1.6.0+ requires the third argument to be a real SQL parameter —
+    /// inline <c>'...'::agtype</c> literals are rejected with error 22023.
     /// </summary>
-    /// <remarks>
-    /// Why not a real Npgsql parameter? Npgsql can't currently bind to the
-    /// third positional parameter of the <c>cypher()</c> SQL function when
-    /// the second argument is a dollar-quoted Cypher block — the JSON literal
-    /// approach is what the AGE docs themselves use in examples. We mitigate
-    /// the injection risk by serialising with <see cref="JsonSerializer"/>
-    /// (which escapes embedded quotes/backslashes correctly) and by gating
-    /// keys through <see cref="PropertyKeyRegex"/>. The SQL single-quote
-    /// escaping is a final defence: any <c>'</c> inside the JSON gets doubled.
-    /// </remarks>
-    private static string BuildParamsLiteral(IDictionary<string, object?> parameters)
+    private static string BuildCypherMap(IDictionary<string, object?> props)
     {
-        var json = JsonSerializer.Serialize(parameters, JsonOpts);
-        var escaped = json.Replace("'", "''");
-        return $"'{escaped}'::agtype";
+        if (props.Count == 0) return "{}";
+        var pairs = props.Select(kv => $"{kv.Key}: {BuildCypherLiteral(kv.Value)}");
+        return "{ " + string.Join(", ", pairs) + " }";
+    }
+
+    private static string BuildCypherLiteral(object? v) => v switch
+    {
+        null => "null",
+        bool b => b ? "true" : "false",
+        sbyte or byte or short or ushort or int or uint or long or ulong => v.ToString()!,
+        float f => f.ToString("G17", System.Globalization.CultureInfo.InvariantCulture),
+        double d => d.ToString("G17", System.Globalization.CultureInfo.InvariantCulture),
+        decimal m => m.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        IDictionary<string, object?> dict => BuildCypherMap(dict),
+        // string before IEnumerable — string implements IEnumerable<char> and would
+        // otherwise be serialised as an array of single-character strings.
+        string s => "'" + s.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n") + "'",
+        System.Collections.IEnumerable en => "[" + string.Join(", ", en.Cast<object?>().Select(BuildCypherLiteral)) + "]",
+        _ => "'" + v.ToString()!.Replace("\\", "\\\\").Replace("'", "\\'").Replace("\r", "\\r").Replace("\n", "\\n") + "'",
+    };
+
+    private static string BuildParamsJson(IDictionary<string, object?> parameters)
+    {
+        return JsonSerializer.Serialize(parameters, JsonOpts);
     }
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -407,11 +431,35 @@ $$, {BuildParamsLiteral(new Dictionary<string, object?>
         WriteIndented = false,
     };
 
-    private static async Task ExecuteCypherAsync(DbConnection conn, DbTransaction? transaction, string sql, CancellationToken ct)
+    /// <summary>
+    /// Executes a Cypher-over-SQL statement. When <paramref name="paramsJson"/>
+    /// is supplied it is bound as <c>$1</c> with DataTypeName
+    /// <c>ag_catalog.agtype</c> — required by AGE 1.6.0+ which forbids inline
+    /// agtype literals as the third argument of <c>cypher()</c>.
+    /// </summary>
+    private static async Task ExecuteCypherAsync(
+        DbConnection conn,
+        DbTransaction? transaction,
+        string sql,
+        CancellationToken ct,
+        string? paramsJson = null)
     {
-        await using var cmd = conn.CreateCommand();
+        await using var cmd = (NpgsqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
-        if (transaction is not null) cmd.Transaction = transaction;
+        if (transaction is not null) cmd.Transaction = (NpgsqlTransaction)transaction;
+        if (paramsJson is not null)
+        {
+            // We delegate all cypher() calls through the public.archmind_cypher_query
+            // wrapper function (see AddAgtypeCypherWrapper migration). That wrapper
+            // takes a JSONB parameter and casts to ag_catalog.agtype inside plpgsql
+            // before invoking cypher(), so the .NET side only needs Npgsql's
+            // built-in JSONB serializer — no custom agtype type mapping required.
+            cmd.Parameters.Add(new NpgsqlParameter
+            {
+                Value = paramsJson,
+                NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Jsonb,
+            });
+        }
         await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 

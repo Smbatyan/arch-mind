@@ -1,3 +1,4 @@
+using System.Text;
 using ArchMind.Api.Auth;
 using ArchMind.Api.Endpoints;
 using ArchMind.Api.Mcp;
@@ -10,10 +11,11 @@ using ArchMind.Infrastructure.Data;
 using ArchMind.Workers;
 using Hangfire;
 using Hangfire.PostgreSql;
-using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
 using Serilog;
 using Serilog.Events;
 
@@ -86,6 +88,13 @@ try
     builder.Services.AddDbContext<ArchMindDbContext>(options =>
         options.UseNpgsql(connectionString));
 
+    // Named HttpClient for outbound calls (e.g. RepoEndpoints.DiscoverOrgAsync
+    // hitting api.github.com). 30s timeout covers paginated repo listings.
+    builder.Services.AddHttpClient("github", c =>
+    {
+        c.Timeout = TimeSpan.FromSeconds(30);
+    });
+
     // -----------------------------------------------------------------------
     // Hangfire (Postgres storage, same connection string)
     // -----------------------------------------------------------------------
@@ -97,45 +106,69 @@ try
             .UseRecommendedSerializerSettings()
             .UsePostgreSqlStorage(c => c.UseNpgsqlConnection(connectionString));
     });
+    // Default-queue server: per-file LlmExtractionJob + everything that doesn't
+    // opt into a dedicated queue. Tight worker cap protects the Anthropic
+    // rate-limit (2 workers × ~6 LLM calls per file = 12 concurrent requests,
+    // well under the 50 req/min org limit).
     builder.Services.AddHangfireServer(opts =>
     {
-        // Limit concurrency to avoid 429 storms against the Anthropic rate limit.
-        // 2 workers = 2 files processed simultaneously, each making ~6 LLM calls
-        // = 12 concurrent requests, well within the 50 req/min org limit.
+        opts.ServerName = "default-worker";
         opts.WorkerCount = 2;
+        opts.Queues = new[] { "default" };
+    });
+
+    // Scan-queue server: caps concurrent repo scans (InitialScanJob /
+    // FullRescanJob) at 5. Each scan is mostly IO (git clone + graphify
+    // structural extract); the heavy per-file LLM work is enqueued onto the
+    // default queue where the tighter worker cap above governs throughput.
+    builder.Services.AddHangfireServer(opts =>
+    {
+        opts.ServerName = "scan-worker";
+        opts.WorkerCount = 5;
+        opts.Queues = new[] { "scan" };
     });
 
     // -----------------------------------------------------------------------
-    // Auth: cookie-based session auth (no Identity, no JWT)
+    // Auth: stateless JWT bearer. Token is read from either the Authorization
+    // header or the "archmind.sid" cookie so SSR pages and bearer clients both
+    // work without any session storage. 10-day fixed expiry (no sliding).
     // -----------------------------------------------------------------------
     builder.Services.AddSingleton<IPasswordHasher, BCryptPasswordHasher>();
 
-    var requireHttps = builder.Configuration.GetValue<bool?>("Auth:RequireHttps")
-        ?? !builder.Environment.IsDevelopment();
+    var jwtKey = builder.Configuration["Jwt:Key"]
+        ?? throw new InvalidOperationException("Jwt:Key is not configured.");
+    var jwtIssuer = builder.Configuration["Jwt:Issuer"] ?? "archmind";
+    var jwtAudience = builder.Configuration["Jwt:Audience"] ?? "archmind";
 
     builder.Services
-        .AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
-        .AddCookie(options =>
+        .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+        .AddJwtBearer(options =>
         {
-            options.Cookie.Name = "archmind.sid";
-            options.Cookie.HttpOnly = true;
-            options.Cookie.SameSite = SameSiteMode.Lax;
-            options.Cookie.SecurePolicy = requireHttps
-                ? CookieSecurePolicy.Always
-                : CookieSecurePolicy.SameAsRequest;
-            options.ExpireTimeSpan = TimeSpan.FromDays(7);
-            options.SlidingExpiration = true;
-
-            // API: return 401/403 status codes instead of redirecting to login/access-denied pages.
-            options.Events.OnRedirectToLogin = ctx =>
+            options.TokenValidationParameters = new TokenValidationParameters
             {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                return Task.CompletedTask;
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+                ValidIssuer = jwtIssuer,
+                ValidAudience = jwtAudience,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+                ClockSkew = TimeSpan.FromMinutes(1),
             };
-            options.Events.OnRedirectToAccessDenied = ctx =>
+            // Also accept the JWT carried as the "archmind.sid" cookie so SSR
+            // pages that already read that cookie keep working unchanged.
+            options.Events = new JwtBearerEvents
             {
-                ctx.Response.StatusCode = StatusCodes.Status403Forbidden;
-                return Task.CompletedTask;
+                OnMessageReceived = ctx =>
+                {
+                    if (string.IsNullOrEmpty(ctx.Token) &&
+                        ctx.Request.Cookies.TryGetValue("archmind.sid", out var cookieToken) &&
+                        !string.IsNullOrEmpty(cookieToken))
+                    {
+                        ctx.Token = cookieToken;
+                    }
+                    return Task.CompletedTask;
+                },
             };
         });
 
@@ -181,6 +214,7 @@ try
     builder.Services.AddSingleton<McpHandshakeHandler>();
     builder.Services.AddSingleton<McpResourcesHandler>();
     builder.Services.AddSingleton<McpToolsHandler>();
+    builder.Services.AddSingleton<McpPromptsHandler>();
 
     // BE-031: get_relevant_context tool handler. Scoped because it depends on
     // EF-scoped services (ISkillMatcher, IFileExtractionRepository). Sibling
@@ -326,6 +360,7 @@ try
     app.MapMcpEndpoints();
     app.MapReportEndpoints();
     app.MapSmokeEndpoints();
+    app.MapJobsEndpoints();
 
     // -----------------------------------------------------------------------
     // Enqueue a one-time job to prove Hangfire is operating.

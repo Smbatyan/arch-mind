@@ -91,4 +91,13 @@ public interface IGraphReader
     /// suitable for health-probe call sites that surface a structured result.
     /// </summary>
     Task<bool> IsAvailableAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Returns all nodes (across every label) and all edges between them for
+    /// the visual graph canvas. Nodes are capped at <paramref name="nodeLimit"/>;
+    /// edges are capped at 3× that value. <see cref="VisualizationData.Truncated"/>
+    /// is set when the node limit is hit.
+    /// </summary>
+    Task<Core.Models.Graph.VisualizationData> GetVisualizationDataAsync(
+        Guid workspaceId, int nodeLimit = 500, CancellationToken ct = default);
 }

@@ -9,7 +9,7 @@ namespace ArchMind.Api.Mcp;
 /// </summary>
 public interface IMcpSessionStore
 {
-    McpSession Create(Guid workspaceId);
+    McpSession Create(Guid workspaceId, Guid? apiKeyId = null);
     McpSession? Get(Guid sessionId);
     bool Remove(Guid sessionId);
     void Touch(Guid sessionId);
@@ -25,9 +25,9 @@ public sealed class InMemoryMcpSessionStore : IMcpSessionStore
         _clock = clock ?? TimeProvider.System;
     }
 
-    public McpSession Create(Guid workspaceId)
+    public McpSession Create(Guid workspaceId, Guid? apiKeyId = null)
     {
-        var session = new McpSession(Guid.NewGuid(), workspaceId, _clock.GetUtcNow().UtcDateTime);
+        var session = new McpSession(Guid.NewGuid(), workspaceId, _clock.GetUtcNow().UtcDateTime, apiKeyId);
         _sessions[session.Id] = session;
         return session;
     }
